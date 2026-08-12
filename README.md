@@ -38,6 +38,10 @@ Harness-native subagents make multi-agent work worse. The pattern repeats wherev
 
 The root cause is an **authority gradient**: the orchestrator → subagent relationship performs *worse* than a single main agent playing the human-project-owner, steering another main agent. The gradient produces four failure modes, all observed in production:
 
+<div align="center">
+<img src="anti_subagent_problem.webp" alt="The authority gradient: orchestrator over native subagents" width="640"/>
+</div>
+
 | Failure mode | What happens | What was observed |
 |---|---|---|
 | **Subagents become livestock** | The orchestrator treats them like cattle; they read and edit files to order, contributing nothing beyond the call | "How is that different from calling a function?" |
@@ -54,6 +58,10 @@ The counter-thesis: **more agents, not fewer, but each one a peer, not a subagen
 - **Peers come in dispositions, not ranks.** One profile, many roles — Engineer, Architect, Reviewer, Scout, Proof Auditor, Shadow. The Lead decides which disposition a peer plays; the peer needs no custom instruction for it.
 
 ### 3. The architecture: Supervisor → Lead → Peer (SLP)
+
+<div align="center">
+<img src="anti_subagent_illustration.webp" alt="The SLP architecture: Supervisor above Lead above Peers" width="640"/>
+</div>
 
 ```
 HUMAN
