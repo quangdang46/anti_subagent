@@ -3,6 +3,7 @@
 > **Status:** research-backed implementation/design plan, 2026-08-13.
 > **Method:** deep code archaeology (not README summaries) of 12+ repositories, every architectural claim anchored to `file:symbol`. Claims are tagged **[VERIFIED-FROM-SOURCE]**, **[INFERENCE]**, **[THESIS-REQUIREMENT]**, or **[OPEN-QUESTION]**.
 > **Output:** the POC is **not** implemented here. This document must be sufficient for another engineer to implement the POC without rediscovering the architecture.
+> **Revision 2026-08-13b (review pass):** 3-arm → 4-arm benchmark (adds SLP-disclosed) to separate the confounded variables; concealment reclassified as a benchmark variable with per-arm `--peer-prompt`; guard blast radius capped to the delegation surface; stall timeout configurable (default 60s); Windows IPC promoted to a P0 gate; benchmark blinding + pre-registered sign-test added; cost estimate added; `locks` table contradiction removed.
 
 ---
 
@@ -50,6 +51,7 @@
 40. [Risks](#40-risks)
 41. [Future Extension: Protocol, Not MCP](#41-future-extension-protocol-not-mcp)
 42. [Final Recommendation](#42-final-recommendation)
+43. [Cost Estimate](#43-cost-estimate)
 
 ---
 
@@ -63,7 +65,7 @@ Deep code archaeology of 12 repositories (slb, herdr, treehouse, firstmate, gnap
 
 2. **The strongest counterexample to the thesis is not native subagents — it is the full-agent flat fleet.** agent-orchestrator ships a working orchestrator→worker fleet that engineers away F1 (livestock) and F3 (context-burn) *by construction* — real subprocess workers, worktree isolation, daemon-owned CI/merge/review routing — while workers openly know an orchestrator exists. opengoat similarly proves **durable full-agent identity is achievable with a fully visible hierarchy**. Both challenge the thesis's load-bearing "identity concealment" claim. [VERIFIED-FROM-SOURCE]
 
-3. **Therefore the experiment must be three-arm, not two.** Native Subagent vs Flat Full-Agent vs SLP. Only this isolates whether any benefit comes from (a) independent full agents, (b) durable identity, or (c) the SLP hierarchy itself. [THESIS-REQUIREMENT] per research baseline §19.
+3. **Therefore the experiment must be four-arm, not three.** Native Subagent vs Flat Full-Agent vs SLP-concealed vs SLP-disclosed. The original 3-arm design conflated two independent variables into ARM B ("no SLP hierarchy, peers know each other" = simultaneously *flat* AND *disclosed*), so no arm represented the counterexamples' *hierarchical-but-disclosed* configuration (opengoat §9.3, agent-orchestrator §9.5). Four arms separate (a) independent full agents, (b) the SLP hierarchy, and (c) hierarchy visibility into isolatable effects. [THESIS-REQUIREMENT] per research baseline §19 and §39.1.
 
 4. **The POC should be a Rust CLI that spawns real coding-agent subprocesses, DEPENDING on treehouse for workspace lease and slb-derived patterns for the guard, ADAPTING herdr's hybrid wait, and clean-room implementing the SLP-specific layer** (identity registry, guard, handoff, events). Agent Mail code cannot be copied (license excludes Anthropic). **Scope decision: CLI-only — no MCP layer is built or planned.** [VERIFIED-FROM-SOURCE + LICENSE]
 
@@ -74,14 +76,14 @@ The plan below gives the exact architecture, protocols, state machine, CLI, benc
 ## 2. Research Baseline
 
 Source material (read in full):
-- `ChatGPT-Thesis và Research Summary-20260813-1456.md` — thesis statement, SLP, POC direction, CLI-first decision, 3-arm benchmark.
+- `ChatGPT-Thesis và Research Summary-20260813-1456.md` — thesis statement, SLP, POC direction, CLI-first decision, 4-arm benchmark (3-arm in the original baseline; expanded to 4 in this revision).
 - `Claude-System check-20260813-1447.md` — round-2 research: opengoat (identity rebuttal), gnap/swarm-protocol (flat coordination axis), agent-orchestrator, multipi, mcp_agent_mail_rust.
 - `RESEARCH_REPOS.md` (in repo) — first 12-repo corpus.
 
 Key decisions locked by the baseline:
 - **CLI-only, no MCP.** The POC is a Rust CLI; no MCP server is built or planned (removed from scope per explicit decision).
 - **Harness-agnostic**: anti_subagent spawns executables (`claude`, `codex`, `opencode`), never harness-native subagent tools.
-- **3-arm experiment**: A=Native Subagent, B=Flat Full-Agent, C=SLP.
+- **4-arm experiment**: A=Native Subagent, B=Flat Full-Agent, C=SLP-concealed, D=SLP-disclosed (see §34).
 - **Peer = independent OS process**, not a function call.
 - **State persisted BEFORE spawn** (firstmate lesson).
 - **Fail-closed guard** (slb lesson).
@@ -107,7 +109,7 @@ Key decisions locked by the baseline:
 - Hierarchy is invisible to workers.
 - Handoff/state is durable.
 
-**Challenge from the corpus (must be answered in the benchmark):** agent-orchestrator and opengoat show full-agent fleets work with a *visible* hierarchy. So "invisible hierarchy" is a **hypothesis**, not a proven requirement. It must be tested as an independent axis (see §34, §39).
+**Challenge from the corpus (must be answered in the benchmark):** agent-orchestrator and opengoat show full-agent fleets work with a *visible* hierarchy. So "invisible hierarchy" is a **hypothesis, not a proven requirement** — and identity concealment is **not a settled architecture default; it is a benchmark variable.** The POC's production model (peer prompts, guard config) must be parameterized so each arm can toggle concealment on or off without structural change (see §16, §22, §34, §39.1).
 
 ---
 
@@ -293,6 +295,7 @@ The docs name it (`docs/subagent-guard.md:19-24`): the bypass "made the in-fligh
 - Guard is a tool-shape heuristic, not reasoning; cannot judge "should this be delegated at all."
 - Grok/OpenCode/Pi not wired in firstmate; anti_subagent needs per-harness adapters.
 - Residual gap: unaccounted work via `Bash` reads as idle not suspicious.
+- **Malformed-input transport risks fail-open (§8.3).** anti_subagent's guard deliberately *fails closed* (slb lineage, §22.3) — a deliberate divergence from firstmate, since the threat (native escape) is only detectable when the control plane is up.
 
 ---
 
@@ -319,8 +322,10 @@ Flat state-sync substrate, MCP+Postgres. Intents/claims/heartbeats/context-packa
 ### 9.5 agent-orchestrator (`Untrivial-ai/agent-orchestrator`, Apache-2.0, Go, 9.5k stars)
 **The strongest counterexample.** Real subprocess workers in tmux (`agentruntime.BuildLaunchCommand` builds `claude --session-id ... --permission-mode ...`, `command.go:90`); supervisor wrapper posts exit state. **Explicit ban on built-in subagents in both system prompts** (`prompt.go:179,269`) + `SubagentStop` hook. Orchestrator role: "coordinate work, not perform implementation" (`prompt.go:161`). **Daemon-owned feedback routing** — `lifecycle/reactions.go:142 ApplyPRObservation` auto-nudges workers on CI-fail/review-changes/merge-conflict with dedup + caps. Reviewer is a real spawned agent on the worker's own worktree (`review/launcher.go:100`). SQLite durable facts, derived status, tmux-is-persistence, Boot Reconcile + StashUncommitted→preserve-ref→3-way-merge replay.
 **What it does NOT ship:** Supervisor above the orchestrator (only `SpawnOrchestrator(clean=true)` → `RetireForReplacement`, service.go:373-427, user-driven not degradation-driven); **workers know an orchestrator exists** (`prompt.go:278-286` workerOrchestratorPrompt) — no invisible hierarchy; no council verdict protocol; no standardized handoff artifact.
+
+**Benchmark implication:** agent-orchestrator's fleet is *hierarchical-but-disclosed*. ARM D of the 4-arm benchmark (§34) represents exactly this configuration, so the POC can measure whether concealment (ARM C) adds anything over a disclosed SLP (ARM D) — and whether disclosed SLP (ARM D) beats a disclosed flat fleet (ARM B). [VERIFIED + THESIS]
 **Key finding:** a full-agent fleet with daemon-owned feedback engineers away F1+F3 by construction while leaving F4 untouched. [VERIFIED]
-**Decision:** ADAPT the substrate (OBSERVE→UPDATE→DERIVE pipeline, durable-facts/derived-status, `sendOnce` dedup, reaper mass-death circuit breaker, `StashUncommitted` preserve/restore). **DO NOT USE** the visible-hierarchy worker model as-is.
+**Decision:** ADAPT the substrate (OBSERVE→UPDATE→DERIVE pipeline, durable-facts/derived-status, `sendOnce` dedup, reaper mass-death circuit breaker, `StashUncommitted` preserve/restore). **DO NOT USE** the visible-hierarchy worker model as-is — but keep the disclosed-SLP configuration as ARM D (§34), so the benchmark can quantify what concealment is actually worth. [VERIFIED + THESIS]
 
 ### 9.6 mcp_agent_mail(_rust) (`Dicklesworthstone/`, MIT + AI-Rider, 2.1k/126 stars)
 **Identity:** semi-persistent, codename ("GreenCastle"), "ephemeral by design" (`README.md:186`), deliberately **rejects role/descriptive names** (`models.rs:585-640`). Flat, peer-known mesh: `list_agents`/`whois` expose the full swarm — collapses identity concealment.
@@ -331,7 +336,7 @@ Flat state-sync substrate, MCP+Postgres. Intents/claims/heartbeats/context-packa
 
 ### 9.7 pi-subagents (`edxeth/pi-subagents`, MIT)
 Harness-native subagent machinery. Orchestrator mode strips tools to `{subagent,...}`. `<subagent-boundary>` marker, context-pressure exit blocks resume, parent-owned timeout sidecar, budget-shrinking. **Its own source concedes the fences are prompt/trust-level, not hard** (`session-files.ts:356-361`: "a child that can write files can rewrite this entry in place").
-**Decision:** REFERENCE for F3/F4 fences + documented trust leaks.
+**Decision:** REFERENCE for F3/F4 fences + documented trust leaks. **Do not reuse pi-subagents' context-pressure exit / budget-shrinking design in anti_subagent**: those assume the *parent* controls the child's context budget, which contradicts the full-agent model (§3); anti_subagent instead measures context consumption via its own event log (§36).
 
 ### 9.8 maestro-orchestrate (`josstei/maestro-orchestrate`, Apache-2.0)
 39-specialist orchestrator → native subagents. TechLead persona never implements (`architecture.md:12`). Hard gates (validate_plan, blockers, no-orchestrator-code). Workers = native subagents, ephemeral.
@@ -411,7 +416,7 @@ Every non-obvious cell traces to source in §5-§9.
 4. Lead/Peer authority model.
 5. Experience-handoff artifact.
 6. SLP governance (Supervisor memory notebook, instruction-patching, Lead replacement).
-7. 3-arm benchmark harness.
+7. 4-arm benchmark harness.
 
 ---
 
@@ -462,6 +467,8 @@ Every non-obvious cell traces to source in §5-§9.
 - **SQLite for state** (single-file, WAL). POC filesystem-first per baseline §12; SQLite when filesystem bottlenecks (identity/events scale). [VERIFIED]
 - **treehouse as external dep** — keeps the Supervisor stateless about filesystem. [VERIFIED]
 - **CLI-only. No MCP layer is built or planned** (explicit scope decision). The CLI is the single control-plane interface. [THESIS-BASELINE]
+- **Peer prompts are a benchmark variable, not a fixed default.** §25 and §22 define the *concealed* prompt, but the peer-prompt text and guard config must be swapped per arm via a `--peer-prompt` parameter (see §34). No prompt text is hard-coded as the sole supported mode. [REVISION]
+- **Windows IPC is a P0 gate.** slb's Unix sockets don't apply; the daemon socket transport (named pipes vs TCP localhost) is chosen in P0, not deferred to §39.7. [REVISION]
 
 ---
 
@@ -472,15 +479,17 @@ anti/
 ├── Cargo.toml            (workspace)
 ├── crates/
 │   ├── anti-core/        identity, lifecycle, events, state machine, hashing (pure)
-│   ├── anti-cli/         commands (spawn/list/status/wait/stop/kill/logs/send/handoff/guard/doctor)
+│   ├── anti-cli/         commands (spawn/list/status/wait/stop/kill/logs/send/handoff/guard/daemon/doctor)
 │   ├── anti-daemon/      event loop, process watcher, IPC (local socket), wait engine
 │   ├── anti-workspace/   treehouse adapter (shell out to `treehouse` binary)
 │   ├── anti-guard/       rule engine + per-harness hook generation (claude/codex/opencode)
 │   ├── anti-adapters/    HarnessAdapter trait + ClaudeCode/Codex/OpenCode impls
 │   ├── anti-recovery/    reconcile on restart, stale PID/workspace sweep
-│   └── anti-bench/       benchmark runner (3-arm)
+│   └── anti-bench/       benchmark runner (4-arm)
 ```
 No MCP crate. The CLI is the entire control plane; harness-agnostic integration is achieved by spawning executables and installing per-harness guard hooks, not by an MCP server. [THESIS-BASELINE]
+
+> **[REVISION]** The `anti daemon` subcommand (start/stop/status) is now listed in the CLI spec (§26) — it was previously only implied by the crate layout. A daemon is required to host the guard's fail-closed socket and the process watcher; it is a P0 deliverable, not an afterthought.
 
 **HarnessAdapter trait** (from baseline §3):
 ```rust
@@ -547,6 +556,8 @@ anti spawn --role peer --harness claude --task task.md
 
 **Identity vs concealment** (opengoat lesson, §9.3): durable identity and invisible hierarchy are **independent axes**. The POC must measure them separately (§17).
 
+**[REVISION]** Durable identity (§16) is a *baseline* for all full-agent arms. **Concealment is a benchmark variable.** ARM C toggles concealment **on**, ARM D toggles it **off** — the only difference between the two arms is the `--peer-prompt` and guard config applied at spawn, *not* the identity/state/workspace substrate (which is identical). This keeps concealment swappable as a runtime parameter rather than a hard-coded CLI default (§34).
+
 ---
 
 ## 17. Lifecycle State Machine
@@ -589,6 +600,8 @@ Only states justified by research. States: **CREATED → STARTING → RUNNING �
 ```
 
 Transitions are enforced by **optimistic-lock UPDATE** (slb `db/requests.go:302` pattern): `UPDATE agents SET status=? WHERE id=? AND status=<expected>`. `Restart` increments `restart_count`, preserves id/workspace/task. [VERIFIED pattern]
+
+**[REVISION]** In SLP arms, **Lead replacement is Supervisor-driven, not self-driven**: a degrading Lead never transitions itself to REPLACED; it signals the Supervisor (durable RECOVERING + `AGENT_DEGRADED` event), and the Supervisor orders the replacement and writes the handoff (§24). This closes the supervisor-replacement gap that agent-orchestrator leaves user-driven (§9.5). In Flat arms there is no Supervisor, so this applies only to ARM C/D.
 
 ---
 
@@ -689,10 +702,12 @@ anti wait peer-01 --until done
 
 **Two-phase `anti send` (herdr `prompt --wait` shape):**
 - Phase 0: snapshot seq + status before send.
-- Phase 1 (activity gate): after send, require ANY state_change_seq bump within 5s, else `AGENT_PROMPT_STALLED`.
+- Phase 1 (activity gate): after send, require ANY state_change_seq bump within a configurable window (default **60s**, not herdr's 5s — LLM agents legitimately go silent during long tool calls / extended thinking; 5s false-positives), else `AGENT_PROMPT_STALLED`.
 - Phase 2: wait until target status, replaying events from pre-submit seq.
 
 **This eliminates F3 polling:** the Lead/CLI never loops "are you done?" — it blocks on `anti wait`, which is event-gated. [VERIFIED pattern]
+
+**[REVISION]** The activity-gate window and the poll interval are **config values**, not literals (defaults: `stall_timeout=60s`, `poll_interval=100ms`), read from `config` (§27). This prevents the wait substrate from misfiring on real LLM latency. The `AGENT_PROMPT_STALLED` event stays, but a stall is only declared when no state_change_seq bump occurs within the configurable window.
 
 ---
 
@@ -716,6 +731,12 @@ Peer → anti spawn → independent OS process → coding agent → ALLOW
 5. **Scope gate:** guard active only in genuine anti-managed peer workspaces (firstmate `fm_primary_scope_matches` shape) — never in the Supervisor/Lead session itself.
 6. **Race:** guard is synchronous at PreToolUse; daemon socket query with short timeout; unknown → deny.
 7. **Audit:** every deny logged to event log (`AGENT_REJECTED` with tool name + reason).
+
+**[REVISION — blast-radius cap]** The guard intercepts **only delegation-shaped tool calls**, not every tool call. The hook's first step is a **local, in-process, deny-list check** (tool name matched against `rules.toml` stems, exactly as firstmate's step 1-5): 
+- A tool name that is **clearly non-delegation** (e.g. `Read`, `Grep`, `Edit`) is allowed **locally, without a daemon round-trip** — the daemon socket is only queried for the small set of *candidate* delegation tools. If the daemon is down, only those candidate tools deny; Read/Grep/Edit keep working.
+- This bounds the fail-closed blast radius to the delegation surface instead of bricking the peer's entire tool use when the daemon is flaky (was §40 "Med", now an explicit design point).
+
+**[REVISION — concealment leak + per-arm guard config]** The guard hook config is installed into the peer's own home/workspace (§22.2); a peer with Read could in principle read `.claude/hooks.json` or the guard rules and discover the orchestration layer. Two mitigations: (a) for ARM C (concealed), the hook file lives **outside the peer's readable scope** where the harness supports it (e.g. a harness-owned config dir), otherwise the concealment leak is accepted and noted; (b) `anti guard install` takes the same `--peer-prompt`/`--arm` toggle as `anti spawn`, so the disclosed arms (B/D) can install a guard that explicitly says "an orchestrator may dispatch work" while the concealed arm (C) installs one that does not. The guard config is **arm-parameterized, not hard-coded**. [THESIS-REQUIREMENT, differs from firstmate deliberately]
 
 **What anti_subagent does NOT copy from firstmate:** fail-open-on-malformed transport (firstmate), and prompt-only subagent ban (agent-orchestrator). Both are weaker than a hard guard. [VERIFIED + THESIS]
 
@@ -781,7 +802,7 @@ Next actions
 | Codex | `codex exec [--resume] --skip-git-repo-check --session <id> -- <msg>` (per opengoat `codex/provider.ts`) | `kill` | config gate on `spawn_agent` |
 | OpenCode | `opencode run --format json [--session <id>]` with `OPENCODE_PERMISSION` allow (per opengoat) | `kill` | `tool.execute.before` hook |
 
-**System-prompt override (identity concealment):** peer receives a clean session with a prompt like "You are working with a human project owner" — **no mention of being an agent/peer in an org** (opengoat's disclosure model is deliberately dropped). [THESIS-REQUIREMENT — but see §39/§17 for the open axis]
+**System-prompt override (identity concealment):** peer receives a clean session with a prompt like "You are working with a human project owner" — **no mention of being an agent/peer in an org** (opengoat's disclosure model is deliberately dropped). **[REVISION — concealment is a benchmark variable, not the default.]** The prompt above is the **ARM C (concealed)** prompt. The same `--peer-prompt` parameter that feeds `adapter.spawn()` also toggles the guard config (§22) and is what distinguishes ARM C from ARM D (disclosed: "You are a peer in an SLP hierarchy; you report to a Lead"): the substrate is identical, only the prompt/guard differ. No prompt text is hard-coded as the sole supported mode. [THESIS-REQUIREMENT — see §39/§17 for the open axis]
 
 **Tool list stays default** — the peer gets no orchestration tools (multipi/pi-subagents mistake avoided). [VERIFIED + THESIS]
 
@@ -793,7 +814,7 @@ Next actions
 
 ### `anti spawn`
 - Purpose: create a durable agent, allocate workspace, launch independent process.
-- Args: `--role peer|lead|supervisor`, `--disposition`, `--harness claude|codex|opencode`, `--task <file>`, `--repo <path>`, `--parent <id>`, `--model <name>`.
+- Args: `--role peer|lead|supervisor`, `--disposition`, `--harness claude|codex|opencode`, `--task <file>`, `--repo <path>`, `--parent <id>`, `--model <name>`, `--peer-prompt <file>` **[REVISION — the concealment toggle; distinct prompt per arm]**.
 - Output (JSON): `{id, status:"starting", pid, worktree, lease_id}`.
 - Exit codes: 0 success; 1 error; 2 invalid args; 3 duplicate id.
 - State: CREATED→STARTING→RUNNING; on any failure → FAILED (never invisible).
@@ -825,9 +846,14 @@ Next actions
 
 ### `anti guard install|status|test`
 - Purpose: install/verify per-harness guard hooks; `test` classifies a tool name (deny/allow). Fail-closed semantics.
+- **[REVISION]** `install` takes `--peer-prompt`/`--arm` to parameterize the guard config per arm (§22), and `status` verifies the daemon socket reachability that the fail-closed path depends on.
 
 ### `anti doctor`
 - Purpose: check daemon, state dir, treehouse dependency, guard installation.
+
+### `anti daemon start|stop|status` **[REVISION — P0 deliverable]**
+- Purpose: manage the control-plane daemon. `start` launches the daemon (owns state/events/wait and the guard's fail-closed socket); `status` reports PID + IPC transport (named pipes vs TCP localhost, chosen in P0 — §13). The daemon was previously only implied by the crate layout (§14); making it an explicit CLI command closes the gap.
+- Exit: 0 running, 1 not-running, 2 transport-unavailable.
 
 **Global flags:** `--json`, `--state-dir` (default `~/.anti_subagent/`), `--config` (defaults<user<project<env<flags, slb pattern).
 
@@ -842,9 +868,9 @@ agents(id PK, role, disposition, harness, parent_id, pid, workspace_lease_id,
        created_at, updated_at, last_state_change_seq)
 events(seq INTEGER PK AUTOINCREMENT, agent_id, type, payload_json, created_at)
 handoffs(id, lead_id, created_at, content_path)
-locks(id, agent_id, holder, acquired_at)      -- optimistic via status, not separate table
-config(key, value)
+config(key, value)                            -- incl. stall_timeout, poll_interval, ipc_transport
 ```
+> **[REVISION]** The `locks` table is **removed**. Optimistic locking is enforced purely by `status`-guarded `UPDATE ... WHERE status=<expected>` (slb pattern); a separate lock table would split authority and was contradictory as written.
 
 Filesystem:
 ```
@@ -886,6 +912,8 @@ From research, the failures anti_subagent must not repeat:
 7. **Unsupervised recovery** (herdr): crashed agent not auto-restarted. Fixed by supervised restart with backoff.
 8. **Visible hierarchy → F4** (opengoat/agent-orchestrator): workers know they're in an org. This is the benchmark axis (§17).
 
+**[REVISION — confounded-variable failure]** The original 3-arm design would have failed to distinguish *hierarchy* from *concealment*: ARM B ("flat, peers know each other") collapsed two variables, so a result would be uninterpretable. Fixed by the 4-arm design (§34): ARM C vs D isolates concealment with the substrate held constant; ARM B vs D isolates hierarchy with disclosure held constant.
+
 ---
 
 ## 30. Threat Model
@@ -918,7 +946,7 @@ From research, the failures anti_subagent must not repeat:
 - Wait protocol (hybrid, two-phase send)
 - Guard (Claude PreToolUse)
 - Recovery (restart/reconcile)
-- Benchmark harness (3-arm)
+- Benchmark harness (4-arm)
 
 **Out of scope (explicitly):**
 - ❌ Web UI, distributed cluster, Kubernetes, complex scheduler, production auth
@@ -950,20 +978,27 @@ From research, the failures anti_subagent must not repeat:
 | **P1** | Persistence + events + hybrid wait | `anti wait --until done` returns without polling; state survives CLI restart |
 | **P2** | Guard (Claude PreToolUse) | Native escape denied; fail-closed when daemon down |
 | **P3** | Recovery + reconcile | Peer crash → supervised restart same id; Supervisor restart preserves state |
-| **P4** | Benchmark harness (3-arm) | Same task, same env, 5 runs/arm, metrics auto-collected |
+| **P4** | Benchmark harness (4-arm) | Same task, same env, 5 runs/arm, metrics auto-collected |
 | **P5** | Second harness (Codex) | Adapter trait proven; guard adapts |
 
 **The plan ends at P5. There is no MCP phase** — the CLI is the entire control plane by explicit scope decision. **Do not proceed to P3 until P0-P1 gates pass** (baseline §14: "If CLI chưa chứng minh được... thì MCP chỉ là API wrapper quanh architecture chưa chứng minh" — and here we do not add MCP at all).
+
+**[REVISION — P0 gates, do not defer]**
+- Windows IPC transport is chosen (named pipes vs TCP localhost) and implemented before the daemon socket work is considered done.
+- The `--peer-prompt`/`--arm` parameter is threaded through `spawn` + `guard install` **in P0**, so concealment stays a runtime toggle and ARM C/D can be built without reworking the adapter layer later.
+- `anti daemon start|status` exists before P1's wait protocol is built (the wait engine + guard both need a daemon).
+- Stall-timeout and poll-interval are config values (defaults 60s / 100ms) from the start, not literals.
 
 ---
 
 ## 34. Benchmark Architecture
 
-**3 arms (baseline §20, §19):**
+**4 arms (baseline §20, §19):**
 ```
 ARM A: Native Subagent     Lead + harness-native Task/spawn_agent workers
 ARM B: Flat Full-Agent     Lead + independent OS process workers (no SLP hierarchy, peers know each other)
-ARM C: SLP                 Supervisor + Lead + independent peers (invisible hierarchy)
+ARM C: SLP (concealed)     Supervisor + Lead + independent peers (invisible hierarchy)
+ARM D: SLP (disclosed)     Supervisor + Lead + independent peers (hierarchy visible to workers)
 ```
 
 **Controlled (same across arms):** repo, commit, task, model, tools, token budget, timeout, environment, test command.
@@ -971,7 +1006,19 @@ ARM C: SLP                 Supervisor + Lead + independent peers (invisible hier
 
 **Run protocol (baseline §19):** 5 runs per task per arm; randomize execution order; never single-run.
 
-**This is the critical design.** Only ARM B vs C isolates whether SLP hierarchy adds value beyond full-agent independence; only ARM A vs B isolates whether full agents add value beyond native subagents. [THESIS-REQUIREMENT]
+**4-arm design [REVISION]:** the original 3-arm design collapsed two variables into ARM B. Four arms separate them:
+- **ARM A — Native Subagent:** Lead + harness-native `Task`/`spawn_agent` workers (subagent → full-agent independence axis).
+- **ARM B — Flat Full-Agent, disclosed:** Lead + independent OS-process workers, **no hierarchy**, peers disclosed (full-agent independence → SLP hierarchy axis, disclosure held constant).
+- **ARM C — SLP, concealed:** Supervisor → Lead → Peer, invisible hierarchy (the thesis's original claim).
+- **ARM D — SLP, disclosed:** same SLP substrate, hierarchy **disclosed** to workers (represents the opengoat/agent-orchestrator configuration §9.3/§9.5).
+
+C vs D differs **only** in `--peer-prompt` + guard config (§22); substrate is identical.
+
+**Blinding:** the `review_score` is scored by a reviewer **blind to which arm produced the artifact** — the benchmark writer (who knows the arms) is not the scorer. Human artifacts are stripped of agent IDs / arm tags before review.
+
+**Pre-registered comparison method:** primary outcome = task_success rate; primary comparison = two-sided exact sign test between arms (treating the 5 runs per task per arm as paired); declare "better" only when the sign test reaches p<0.05 **and** the effect exceeds a stated minimum (e.g. ≥1 success / ≥20% token reduction). Report raw data, not just summary stats.
+
+**This is the critical design.** Only ARM B vs D isolates whether the SLP hierarchy adds value beyond full-agent independence (both disclosed); only ARM A vs B isolates whether full agents add value beyond native subagents; only ARM C vs D isolates whether concealment adds value (the §39.1 axis), with the substrate held constant. [THESIS-REQUIREMENT]
 
 ---
 
@@ -1043,7 +1090,7 @@ Each recorded as setup→inject→expected→observed→pass/fail in `runs/<run-
 - [ ] Claude Code adapter
 
 **Benchmark:**
-- [ ] Native/Flat/SLP arms
+- [ ] Native / Flat / SLP-concealed / SLP-disclosed arms
 - [ ] 5 runs/arm
 - [ ] Automatic metrics
 - [ ] Reproducible (same repo/commit/model/task)
@@ -1060,13 +1107,13 @@ SLP           PASS: X/Y  tokens: ...  recovery: ...
 
 ## 39. Open Questions
 
-1. **[THESIS-CHALLENGE]** Is "invisible hierarchy" (identity concealment) a **causal lever** for F4, or a deployment choice? opengoat/agent-orchestrator show full-agent fleets work with visible hierarchy. The benchmark's ARM B (flat) vs ARM C (SLP) is designed to answer this — but ARM B must be defined to *disclose* hierarchy, so the axis is "hierarchy + concealment" vs "hierarchy disclosed" vs "flat". **This is the single most important design risk to resolve before the benchmark.**
+1. **[THESIS-CHALLENGE]** Is "invisible hierarchy" (identity concealment) a **causal lever** for F4, or a deployment choice? opengoat/agent-orchestrator show full-agent fleets work with visible hierarchy. **[REVISION]** The 4-arm benchmark (§34) now separates the three variables: **ARM C vs D isolates concealment** (same SLP substrate, prompt/guard swapped only); **ARM B vs D isolates hierarchy** (both disclosed). This resolves the axis the 3-arm design confounded. **Concealment is treated as a benchmark variable throughout** — §16/§22/§25 no longer hard-code it as the default; `--peer-prompt` and `--arm` thread through spawn and guard install. **This is the single most important design risk to resolve before the benchmark.**
 2. Experience-handoff artifact **format** (.md vs .json vs both)? Research baseline leaves it open.
 3. Control-plane events **schema** (context %, review-count > 3)? herdr's `events.subscribe/wait` is the substrate reference.
 4. Is the guard's **fail-closed-on-malformed** stance (vs firstmate's fail-open) the right tradeoff? It prevents escape but can block legitimate delegation if the daemon is flaky.
 5. **Peer prompt wording** for "working with a human" — exact phrasing that achieves concealment without harming autonomy.
 6. Does the POC need a **verdict council** (Engineer/Reviewer/Architect) in the SLP arm, or is a single Lead verdict sufficient for P0-P4?
-7. **Windows IPC** for the daemon socket (named pipes vs TCP localhost) — slb is Unix-only; herdr/treehouse are cross-platform.
+7. **Windows IPC** for the daemon socket (named pipes vs TCP localhost) — slb is Unix-only; herdr/treehouse are cross-platform. **[REVISION — resolved in P0, not deferred]** Windows is the primary dev environment, so the transport is chosen and implemented as a P0 gate (§33); if it blocks, it blocks P0, not P5.
 
 ---
 
@@ -1075,14 +1122,17 @@ SLP           PASS: X/Y  tokens: ...  recovery: ...
 | Risk | Severity | Mitigation |
 |---|---|---|
 | Benchmark can't distinguish arms (short tasks) | High | Long-horizon tasks only (§35) |
-| "Invisible hierarchy" claim untestable as designed | High | ARM B discloses; resolve §39.1 |
+| "Invisible hierarchy" claim untestable as designed | High | 4-arm design separates concealment (C vs D) from hierarchy (B vs D); §34.2 |
 | License contamination (AI-Rider) | High | Clean-room; treehouse plain-MIT binary only |
-| Guard fail-closed blocks legitimate work | Med | Escape hatch at launch; audit log; `doctor` |
+| Guard fail-closed blocks legitimate work | Med | **Blast radius capped to delegation-shaped calls (§22)**; escape hatch at launch; audit log; `doctor` |
 | Lease leak on Supervisor crash | Med | Lease inventory persisted; reconcile |
 | Peer session files editable (pi-subagents leak) | Med | daemon-owned registry; peers no state write |
 | herdr recovery manual (no supervised restart) | Med | anti adds supervised restart w/ backoff |
 | treehouse not-a-daemon → same-machine only | Low (POC) | Documented limitation |
 | Scope creep (MCP/UI/cluster) | High | Explicit non-goals (§32) |
+| **Windows IPC transport blocks the daemon (P0)** | High | Transport chosen + implemented as a P0 gate (§33); do not defer to §39.7 |
+| **Benchmark cost** (5 tasks × 4 arms × 5 runs) | Med | Rough estimate §43; right-size to budget before P4 |
+| **Concealment leak via readable guard config** | Med | Hook file outside peer's readable scope where harness allows; else accept + document (§22) |
 
 ---
 
@@ -1103,10 +1153,35 @@ SLP           PASS: X/Y  tokens: ...  recovery: ...
 ## 42. Final Recommendation
 
 1. **Build the POC as a Rust CLI**, DEPENDING on treehouse for workspace lease, ADAPTING slb (guard patterns) + herdr (hybrid wait) + firstmate (metadata-before-spawn, shape-deny) + agent-orchestrator (substrate pipeline) as patterns, and **clean-room authoring the SLP-specific layer** (identity registry, guard, handoff, events, benchmark).
-2. **Resolve §39.1 first** — the invisible-hierarchy axis — because it determines whether ARM B and ARM C are meaningfully distinct. Treat identity concealment as a **benchmark variable, not an assumed invariant**.
+2. **Resolve §39.1 via the 4-arm design** — the invisible-hierarchy axis is now measured as ARM C vs ARM D, with concealment a **benchmark variable** threaded as `--peer-prompt`/`--arm` through spawn and guard install. It is a runtime toggle, not an assumed invariant. Proceed with P0–P3 first: those are implementation-agnostic to how §39.1 resolves.
 3. **Follow the phases** (§33): P0 spawn → P1 persist+events+wait → P2 guard → P3 recovery → P4 benchmark → P5 second harness. Do not skip gates. **CLI-only; no MCP phase exists.**
 4. **Measure everything from anti's own logs**, never agent self-reports.
-5. **The thesis is not yet proven.** The plan's value is that it converts the thesis from a manifesto into a **falsifiable 3-arm experiment** whose only unknown is whether independent full agents + SLP hierarchy actually outperform native subagents on long-horizon work.
+5. **The thesis is not yet proven.** The plan's value is that it converts the thesis from a manifesto into a **falsifiable 4-arm experiment** whose only unknown is whether independent full agents + SLP hierarchy (+ concealment) actually outperform native subagents on long-horizon work. Blind the review, pre-register the comparison, report raw data (§34.2).
+
+---
+
+## 43. Cost Estimate
+
+**[REVISION — added to make P4 a real gate, not a surprise.]** Rough budget for the benchmark (the dominant cost driver), plus dev-time for P0–P3.
+
+**Assumptions:** long-horizon tasks ≈ 100–400k input + 30–100k output tokens per full-agent run (single agent). SLP arms (C/D) run ~3 concurrent agents; ARM A runs a Lead + subagents. Multiply by a conservative 1.2× for restarts/reconciling.
+
+| Arm | Tokens per run | Runs (5 tasks × 5 reps = 25) | Total |
+|---|---|---|---|
+| A — Native Subagent | ~150k in / 60k out | 25 | 3.75M in / 1.5M out |
+| B — Flat Full-Agent (disclosed) | ~250k in / 80k out | 25 | 6.25M in / 2M out |
+| C — SLP (concealed) | ~3 × 250k = 750k in / 240k out | 25 | 18.75M in / 6M out |
+| D — SLP (disclosed) | ~3 × 250k = 750k in / 240k out | 25 | 18.75M in / 6M out |
+| **Total** | | **100 runs** | **~47M in / ~16M out** |
+
+At ~$3/M in + $15/M out (rough Opus-class pricing), this is **~$350–400 per full sweep**; ~$500 with restarts. A single full benchmark = 100 agentic runs (many with 3 concurrent agents) — **~20–30 wall-clock hours** of agent time on a decent machine.
+
+**Right-sizing levers (if the budget is tight):**
+- Drop to 3 tasks × 5 reps = 60 runs (~$250) — still distinguishes arms on the sign test.
+- Run ARM C/D at the same token *cap* as B instead of 3× (make hierarchy budget-neutral) — changes what's being tested; decide deliberately.
+- Reduce reps only to 3 for ARM C/D (the two arms that cost the most) once they track each other on early runs.
+
+**Dev-time (P0–P3):** the infra itself is modest — a Rust CLI + SQLite + subprocess spawn + hooks is **~3–5 engineer-days** to P2 (spawn/persist/guard), P3 recovery ~2–3 more days, P4 harness ~3–5 days. The benchmark runs are the real cost; budget the sweep as part of P4.
 
 ---
 
