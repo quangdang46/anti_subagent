@@ -49,6 +49,16 @@ The root cause is an **authority gradient**: the orchestrator → subagent relat
 | **Context burned on polling** | The orchestrator polls "are you done yet" instead of reasoning, wasting context and missing state that changed underneath it | "It polls to check whether the agent below is done — that wastes context" → production instructions now say: "Wait for completion notifications instead of polling active agents" |
 | **Identity deception** | The worker knows it is subordinate, so it stops acting like an owner of the outcome | Workers are deliberately kept believing they talk to a human: "the agent must believe it is communicating with the user, when in reality it is the orchestrator" |
 
+#### A documented production incident
+
+These failure modes are not hypothetical. On 2026-07-22 a firstmate primary (a fleet-supervision distro for coding agents) delegated four workers through its harness's built-in subagent tool instead of its own spawn command. What followed was the failure modes above, in order:
+
+- **Fleet blindness** — the supervision view showed zero work under way for the whole run, because no task metadata was ever created; the subagent calls were invisible to the orchestration layer.
+- **Loss on restart** — when the primary session restarted, two of the four workers died mid-flight and their work was lost.
+- **Silent supervision collapse** — the watch cycle stayed down for 73 minutes unnoticed, killing an intake channel.
+
+The project's fix was not "fewer agents" — it shipped a guard that *denies delegation-shaped tool calls* and forces work through real, metadata-writing spawn paths. That is the SLP conclusion applied: the problem is subordinate agents without identity or state, and the fix is full agents.
+
 ### 2. The fix is not "no agents" — it's full agents
 
 The counter-thesis: **more agents, not fewer, but each one a peer, not a subagent.**
@@ -75,7 +85,7 @@ HUMAN
 
 | Tier | Role | Boundaries |
 |---|---|---|
-| **Supervisor** | Governance front door. Talks to the human, monitors every workspace, keeps a memory notebook, performs continuous optimization. | Read-only by default. On-demand only — no heartbeat, no goal-setting. Never bypasses Lead, never reads Peer transcripts. |
+| **Supervisor** | Governance front door. Talks to the human, monitors every workspace, keeps a memory notebook, performs continuous optimization. | Read-only by default. On-demand only — no heartbeat, no goal-setting. Never bypasses Lead. Hands-off from Peers is the reference posture; whether it may read Peer transcripts or contact Peers is a deployment choice, not a universal rule. |
 | **Lead** (ex-Root) | God of its workspace. Owns project outcome, topology, cross-scope decisions, integration, verification, technical acceptance. Spawns Peers and routes work by model capability. | Never presolves, never implements. Does not know a Supervisor exists above it. |
 | **Peer** | One profile, many dispositions — Engineer, Architect, Reviewer, Scout, Proof Auditor, Shadow. | No custom instruction, no knowledge of the orchestration layer. **Must believe it is working with a human.** May challenge a material premise. |
 
@@ -104,9 +114,9 @@ Infrastructure exists. Orchestrators don't. The ecosystem ships terminal runtime
 | **On-demand Supervisor** | Read-only governance agent with memory notebook + instruction-patching authority | Always-on watchers exist; on-demand supervisors don't |
 | **Lead that never presolves** | Verdict-protocol coordinator, delegation-only | Lives in privately traded instruction drafts |
 | **Peers that believe they work for a human** | Identity-controlled workers | Deliberately undocumented config snippets |
-| **Experience handoff artifact** | How a Lead's lessons survive its retirement | Open question — unanswered |
+| **Experience handoff artifact** | How a Lead's lessons survive its retirement | Practice exists (≈5–7 compactions triggers handoff); a standard artifact format is the open question |
 | **Control-plane events** | Subscribe to a Lead's context %; alarm when review calls per task exceed 3 | Feature request, unimplemented |
-| **Detached Lead** | Supervisor-created Lead that doesn't know it has a parent | Pattern in the wild, no documentation |
+| **Detached Lead** | Supervisor-created Lead that doesn't know it has a parent | Pattern in the wild; documented here |
 
 This repository exists to close that gap: write down the SLP architecture, version the role instructions, and ship the missing pieces.
 
@@ -114,9 +124,9 @@ This repository exists to close that gap: write down the SLP architecture, versi
 
 ## Why not just use the existing tools
 
-Terminal runtimes exist. Work trackers exist. Execution-safety gates exist. Crew-spawning distros exist. What does **not** exist anywhere: an on-demand read-only **Supervisor** with a memory notebook and instruction-patching authority, a **Lead** that never presolves and follows the verdict protocol, and **peers that believe they work for a human**.
+Terminal runtimes exist. Work trackers exist. Execution-safety gates exist. Crew-spawning distros exist — and some now patch and version agent instructions, or enforce "delegate only through real tools, never native subagents." What does **not** exist anywhere: an on-demand read-only **Supervisor** that sits *above* a **Lead** which does not know it exists — keeping a memory notebook, patching instructions, and able to replace a degrading Lead — plus a **Lead** that never presolves, and **peers that believe they work for a human**.
 
-Every existing tool covers one piece of the workflow — none covers the supervision layer itself, and the ones that come closest supervise *by watching*, not by governing. That is the gap this repository targets.
+Every existing tool covers one piece of the workflow — none covers the supervision layer itself, and the ones that come closest supervise *by watching* (an always-on monitor over spawned workers), not by governing. That is the gap this repository targets.
 
 ---
 
@@ -136,7 +146,7 @@ Multi-agent is the goal. Subagents are the specific failure mode: subordinate ag
 No — by design. "The peer must believe it's working with a human." Identity is a control variable: when the worker believes it is trusted and accountable, it stops behaving like livestock.
 
 **Doesn't an existing crew distro already do this?**
-The closest existing tools supervise *by watching* — an always-on monitor over spawned workers. SLP wants a supervisor that is on-demand, read-only, and *above* leads — able to patch instructions and create a new Lead. No shipped tool has that authority model.
+The closest existing tools supervise *by watching* — an always-on monitor over spawned workers — and the most advanced now enforce the "no native subagents" rule (e.g. firstmate ships a PreToolUse guard that denies delegation-shaped tool calls). What none ships is the supervisor that is on-demand, read-only, and *above* leads — able to patch instructions and replace a degrading Lead. As of this writing, no shipped tool has that authority model.
 
 **Is this a tool or a document?**
 Today: a document plus a research corpus. Tomorrow: role instructions, a handoff format, a control-plane event spec, and a reference implementation on top of existing infrastructure.
@@ -146,7 +156,7 @@ No. It is distilled from production observations with strong practitioner consen
 
 ## Limitations
 
-- **Anecdotal, not measured.** The observations describe degradation and fixes; no before/after numbers were captured.
+- **Anecdotal, not measured.** The observations describe degradation and fixes, drawn from practitioner reports and one documented production incident (firstmate, 2026-07-22); no controlled before/after numbers were captured.
 - **Quotes are translated.** Nuance and jargon can shift.
 - **Fast-moving model landscape.** The routing practice (dsv4f, luna, sol) is current as of mid-2026 and will age quickly.
 - **No shipped implementation.** Every mechanism (verdict protocol, handoff format, control-plane events) is consensus, not running code.
