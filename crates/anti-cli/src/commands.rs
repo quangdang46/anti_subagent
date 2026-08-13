@@ -152,9 +152,18 @@ pub fn daemon(state_dir: &PathBuf, action: crate::DaemonAction) -> Result<String
                 .parent()
                 .map(|p| p.join("anti-daemon"))
                 .unwrap_or_else(|| PathBuf::from("anti-daemon"));
-            let child = Command::new(daemon_bin)
+            // Detach the daemon into its own process group/session so a
+            // killed parent shell (e.g. a timed-out Bash tool call) never
+            // takes the daemon down with it.
+            let child = Command::new("setsid")
+                .arg(&daemon_bin)
                 .env("ANTI_STATE_DIR", state_dir)
                 .spawn()
+                .or_else(|_| {
+                    Command::new(&daemon_bin)
+                        .env("ANTI_STATE_DIR", state_dir)
+                        .spawn()
+                })
                 .map_err(|e| format!("cannot start daemon: {e}"))?;
             // Give the socket a moment to appear.
             for _ in 0..50 {
