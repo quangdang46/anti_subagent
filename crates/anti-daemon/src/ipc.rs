@@ -12,6 +12,8 @@ pub const SOCKET_NAME: &str = "anti.sock";
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "method", content = "params")]
 pub enum Request {
+    /// Graceful shutdown: the daemon exits and removes its socket.
+    Shutdown,
     Ping,
     /// Guard policy query (fail-closed: only reachable while daemon is up).
     GuardCheck { tool: String },
@@ -81,33 +83,52 @@ where
         std::fs::remove_file(socket)?;
     }
     let handle = std::sync::Arc::new(handle);
+    let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let listener = UnixListener::bind(socket)?;
-    for stream in listener.incoming() {
-        match stream {
-            Ok(stream) => {
-                let handle = handle.clone();
-                std::thread::spawn(move || {
-                    let mut reader = BufReader::new(stream);
-                    let mut line = String::new();
-                    match reader.read_line(&mut line) {
-                        Ok(0) | Err(_) => return,
-                        Ok(_) => {}
-                    }
-                    let resp = match serde_json::from_str::<Request>(&line) {
-                        Ok(req) => handle(req),
-                        Err(e) => Response::err("bad_request", format!("{e}")),
-                    };
-                    let mut out = serde_json::to_string(&resp).unwrap_or_else(|_| {
-                        serde_json::to_string(&Response::err("internal", "serialize")).unwrap()
-                    });
-                    out.push('\n');
-                    let mut stream = reader.into_inner();
-                    let _ = stream.write_all(out.as_bytes());
-                });
+    listener.set_nonblocking(true)?;
+    loop {
+        // Graceful shutdown: the dispatch sets this flag on Shutdown; the
+        // accept loop polls it so the daemon terminates even without new
+        // connections.
+        if shutdown.load(std::sync::atomic::Ordering::SeqCst) {
+            let _ = std::fs::remove_file(socket);
+            return Ok(());
+        }
+        let stream = match listener.accept() {
+            Ok((stream, _)) => stream,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                continue;
             }
             Err(_) => continue,
-        }
+        };
+        let handle = handle.clone();
+        let shutdown = shutdown.clone();
+        std::thread::spawn(move || {
+            let mut reader = BufReader::new(stream);
+            let mut line = String::new();
+            match reader.read_line(&mut line) {
+                Ok(0) | Err(_) => return,
+                Ok(_) => {}
+            }
+            let resp = match serde_json::from_str::<Request>(&line) {
+                Ok(req) => {
+                    if matches!(req, Request::Shutdown) {
+                        shutdown.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    handle(req)
+                }
+                Err(e) => Response::err("bad_request", format!("{e}")),
+            };
+            let mut out = serde_json::to_string(&resp).unwrap_or_else(|_| {
+                serde_json::to_string(&Response::err("internal", "serialize")).unwrap()
+            });
+            out.push('\n');
+            let mut stream = reader.into_inner();
+            let _ = stream.write_all(out.as_bytes());
+        });
     }
+    #[allow(unreachable_code)]
     Ok(())
 }
 

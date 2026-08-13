@@ -166,13 +166,27 @@ pub fn daemon(state_dir: &PathBuf, action: crate::DaemonAction) -> Result<String
             Err("daemon failed to come up within 5s".into())
         }
         crate::DaemonAction::Stop => {
-            // P0: no control message yet — kill by pidfile would be ideal; for
-            // now we require the socket to disappear after killing the process.
             let sock = socket(state_dir);
             if !sock.exists() {
                 return Ok("daemon not running".into());
             }
-            Err("stop not implemented in P0 — kill the anti-daemon process manually (e.g. pkill -f anti-daemon)".into())
+            // Send a shutdown request; the daemon's serve loop exits and the
+            // process terminates, removing the socket.
+            let req = serde_json::json!({"method": "Shutdown"});
+            let line = format!("{req}\n");
+            if let Ok(stream) = std::os::unix::net::UnixStream::connect(&sock) {
+                let mut stream = stream;
+                use std::io::Write;
+                let _ = stream.write_all(line.as_bytes());
+            }
+            // Wait for the socket to disappear.
+            for _ in 0..50 {
+                if !sock.exists() {
+                    return Ok("daemon stopped".into());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err("daemon did not stop within 5s".into())
         }
         crate::DaemonAction::Status => {
             let sock = socket(state_dir);

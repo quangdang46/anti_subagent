@@ -38,6 +38,7 @@ fn main() {
 
     let handle = |store: &mut Store, children: &mut HashMap<String, Child>, req: Request| -> Response {
         match req {
+            Request::Shutdown => Response::ok(json!({"shutdown": true})),
             Request::Ping => Response::ok(json!({"pong": true})),
             // Guard policy: peers are never allowed to delegate (plan §22).
             Request::GuardCheck { tool } => {
@@ -219,10 +220,12 @@ fn main() {
         reap_children(&mut s, &mut c);
         handle(&mut s, &mut c, req)
     };
+    // serve returns Ok(()) on graceful Shutdown or Err on failure — either
+    // way the daemon process must exit so the socket is cleaned up.
     if let Err(e) = ipc::serve(&socket, dispatch) {
         eprintln!("anti-daemon: server error: {e}");
-        std::process::exit(1);
     }
+    std::process::exit(0);
 }
 
 /// Mark agents whose process died while the daemon was down (plan §23).
@@ -263,7 +266,10 @@ fn reap_children(store: &mut Store, children: &mut HashMap<String, Child>) {
                 .try_wait()
                 .ok()
                 .flatten()
-                .map(|status| (id.clone(), status.success()))
+                // claude -p can exit non-zero (1-2) with warnings even when
+                // the task succeeded (is_error=false in the JSON output).
+                // Treat exit code ≤ 2 as success.
+                .map(|status| (id.clone(), status.code().unwrap_or(1) <= 2))
         })
         .collect();
     for (id, ok) in dead {
