@@ -1,0 +1,8 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/anti-core",
+    "crates/anti-cli",
+    "crates/anti-daemon",
+    "crates/anti-workspace",
+]

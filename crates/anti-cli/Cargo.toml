@@ -1,0 +1,11 @@
+[package]
+name = "anti-cli"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anti-core = { path = "../anti-core" }
+anti-daemon = { path = "../anti-daemon" }
+anti-workspace = { path = "../anti-workspace" }
+clap = { version = "4", features = ["derive"] }
+serde_json = "1"
