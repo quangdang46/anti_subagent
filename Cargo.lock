@@ -74,6 +74,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "anti-bench"
+version = "0.1.0"
+dependencies = [
+ "anti-core",
+ "anti-daemon",
+ "serde_json",
+]
+
+[[package]]
 name = "anti-cli"
 version = "0.1.0"
 dependencies = [

@@ -33,7 +33,7 @@ fn main() {
     reconcile_on_start(&mut store);
 
     // Track live children so a peer's exit becomes AGENT_COMPLETED/CRASHED.
-    let mut children: HashMap<String, Child> = HashMap::new();
+    let children: HashMap<String, Child> = HashMap::new();
 
     let handle = |store: &mut Store, children: &mut HashMap<String, Child>, req: Request| -> Response {
         match req {
@@ -50,7 +50,8 @@ fn main() {
                 task_path,
                 repo,
                 parent_id,
-            } => spawn(store, children, &id, &role, disposition.as_deref(), &harness, task_path.as_deref(), &repo, parent_id.as_deref()),
+                prompt,
+            } => spawn(store, children, &id, &role, disposition.as_deref(), &harness, task_path.as_deref(), &repo, parent_id.as_deref(), prompt.as_deref()),
             Request::ListAgents => match store.list_agents() {
                 Ok(agents) => Response::ok(agents),
                 Err(e) => Response::err("store", e.to_string()),
@@ -120,11 +121,104 @@ fn main() {
         socket.display(),
         store.current_sequence()
     );
-    if let Err(e) = ipc::serve(&socket, |req| {
-        // reap children first so completion events fire promptly
-        reap_children(&mut store, &mut children);
-        handle(&mut store, &mut children, req)
-    }) {
+    // Periodic reaper: a peer's exit must become COMPLETED/CRASHED even when
+    // no IPC request ever arrives (e.g. a long `anti wait`). Without this the
+    // benchmark would hang forever on a dead agent.
+    let store = std::sync::Arc::new(std::sync::Mutex::new(store));
+    let children = std::sync::Arc::new(std::sync::Mutex::new(children));
+    // Reaper uses try_lock so it can never block or deadlock the IPC loop.
+    let (rs, rc) = (store.clone(), children.clone());
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_secs(5));
+        if let (Ok(mut s), Ok(mut c)) = (rs.try_lock(), rc.try_lock()) {
+            reap_children(&mut s, &mut c);
+        }
+    });
+    // Lease sweeper: releases treehouse leases of agents that reached a
+    // terminal state. Runs OUTSIDE the state lock (treehouse subprocess can
+    // block), so it never stalls IPC. Treehouse acquire skips leased
+    // worktrees, but without this the pool fills up over many runs.
+    let sweeper_store = store.clone();
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_secs(15));
+        let terminal: Vec<(String, String, String)> = {
+            let s = match sweeper_store.lock() {
+                Ok(g) => g,
+                Err(_) => continue,
+            };
+            s.list_agents()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|a| a.status.is_terminal())
+                .filter_map(|a| {
+                    a.workspace
+                        .map(|w| (a.id.clone(), w.lease_id.clone(), w.path.clone()))
+                })
+                .collect()
+        };
+        for (id, lease_id, path) in terminal {
+            let _ = Treehouse::new(PathBuf::from("treehouse")).release_if_lease(
+                &lease_id,
+                std::path::Path::new(&path),
+                std::path::Path::new(&path),
+            );
+            if let Ok(mut s) = sweeper_store.lock() {
+                let _ = s.clear_workspace(&id);
+            }
+        }
+    });
+    let (s2, c2) = (store.clone(), children.clone());
+    let dispatch = move |req: Request| -> Response {
+        // WaitAgent must NOT hold the state locks while it loops for minutes —
+        // that would starve every other request. It polls with short, discrete
+        // lock acquisitions instead.
+        if let Request::WaitAgent {
+            id,
+            until,
+            timeout_secs,
+        } = &req
+        {
+            let until_status = parse_status(until).unwrap_or(AgentStatus::Completed);
+            let timeout = Duration::from_secs((*timeout_secs).max(1));
+            let deadline = std::time::Instant::now() + timeout;
+            let mut last_seq = 0u64;
+            loop {
+                let status = {
+                    let s = match s2.lock() {
+                        Ok(g) => g,
+                        Err(_) => return Response::err("internal", "state lock poisoned"),
+                    };
+                    let cur = s.current_sequence();
+                    let rec = s.get_agent(id).ok().flatten();
+                    (cur, rec.map(|r| r.status))
+                };
+                let (seq, status) = status;
+                if let Some(st) = status {
+                    if st == until_status {
+                        return Response::ok(json!({"id": id, "status": format!("{:?}", st)}));
+                    }
+                    if st.is_terminal() && st != until_status {
+                        return Response::ok(json!({"id": id, "status": format!("{:?}", st)}));
+                    }
+                }
+                if seq != last_seq {
+                    last_seq = seq;
+                    continue;
+                }
+                if std::time::Instant::now() >= deadline {
+                    return Response::err("wait", format!("timeout after {timeout:?} waiting for {id}"));
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+        let (mut s, mut c) = match (s2.lock(), c2.lock()) {
+            (Ok(s), Ok(c)) => (s, c),
+            _ => return Response::err("internal", "state lock poisoned"),
+        };
+        reap_children(&mut s, &mut c);
+        handle(&mut s, &mut c, req)
+    };
+    if let Err(e) = ipc::serve(&socket, dispatch) {
         eprintln!("anti-daemon: server error: {e}");
         std::process::exit(1);
     }
@@ -159,8 +253,7 @@ fn reconcile_on_start(store: &mut Store) {
     }
 }
 
-/// Poll children with try_wait; on exit, mark the agent Completed/Crashed and
-/// release its treehouse lease (plan §19 idempotent return).
+/// Poll children with try_wait; on exit, mark the agent Completed/Crashed.
 fn reap_children(store: &mut Store, children: &mut HashMap<String, Child>) {
     let dead: Vec<(String, bool)> = children
         .iter_mut()
@@ -175,15 +268,6 @@ fn reap_children(store: &mut Store, children: &mut HashMap<String, Child>) {
     for (id, ok) in dead {
         children.remove(&id);
         let _ = store.mark_exit(&id, ok);
-        if let Ok(Some(rec)) = store.get_agent(&id) {
-            if let Some(ws) = &rec.workspace {
-                let _ = Treehouse::new(PathBuf::from("treehouse")).release_if_lease(
-                    &ws.lease_id,
-                    std::path::Path::new(&ws.path),
-                    std::path::Path::new(&ws.path),
-                );
-            }
-        }
     }
 }
 
@@ -220,22 +304,39 @@ fn restart_agent(
                 .unwrap_or_else(|_| ".".to_string())
         });
 
-    let mut cmd = std::process::Command::new("script");
+    let mut cmd = std::process::Command::new("claude");
     let log_path = std::env::var("HOME")
         .map(|h| PathBuf::from(h).join(".anti_subagent/logs"))
         .unwrap_or_else(|_| PathBuf::from("/tmp/anti_logs"));
     std::fs::create_dir_all(&log_path).ok();
     let log_file = log_path.join(format!("{id}.log"));
+    // Truncate the previous session's log so stale output (e.g. an old trust
+    // dialog) can never be misread as this session's state.
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&log_file);
     cmd.args([
-        "-q",
-        log_file.to_str().unwrap_or("/dev/null"),
-        "claude",
+        "-p",
+        "--output-format",
+        "json",
         "--permission-mode",
         "acceptEdits",
+        "--dangerously-skip-permissions",
         "--append-system-prompt",
         "You are a peer working on this repository with the project owner. Work independently.",
     ]);
     cmd.current_dir(&repo);
+    cmd.stdin(std::process::Stdio::null());
+    cmd.stdout(std::process::Stdio::from(
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_file)
+            .unwrap_or_else(|_| std::fs::OpenOptions::new().create(true).append(true).open("/dev/null").unwrap()),
+    ));
+    cmd.stderr(std::process::Stdio::inherit());
     let child = cmd.spawn().map_err(|e| e.to_string())?;
     let pid = child.id();
     let _ = store.inc_restart(id);
@@ -257,6 +358,7 @@ fn spawn(
     task_path: Option<&str>,
     repo: &str,
     parent_id: Option<&str>,
+    prompt: Option<&str>,
 ) -> Response {
     // 1. validate
     if id.trim().is_empty() {
@@ -328,25 +430,52 @@ fn spawn(
     };
     let _ = store.set_workspace(id, &worktree.lease_id, &worktree.path.display().to_string());
 
-    // 5-6. spawn the harness in a PTY inside the leased worktree
-    let mut cmd = std::process::Command::new("script");
+    // 5-6. spawn the harness non-interactively inside the leased worktree
+    let mut cmd = std::process::Command::new("claude");
     let log_path = std::env::var("HOME")
         .map(|h| PathBuf::from(h).join(".anti_subagent/logs"))
         .unwrap_or_else(|_| PathBuf::from("/tmp/anti_logs"));
     std::fs::create_dir_all(&log_path).ok();
     let log_file = log_path.join(format!("{id}.log"));
+    // Truncate previous session log (see restart_agent).
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&log_file);
+    let peer_prompt = prompt.unwrap_or(
+        "You are a peer working on this repository with the project owner. Work independently.",
+    );
     cmd.args([
-        "-q",
-        log_file.to_str().unwrap_or("/dev/null"),
-        "claude",
+        "-p",
+        "--output-format",
+        "json",
         "--permission-mode",
         "acceptEdits",
+        "--dangerously-skip-permissions",
         "--append-system-prompt",
-        "You are a peer working on this repository with the project owner. Work independently.",
+        peer_prompt,
     ]);
     cmd.current_dir(&worktree.path);
+    // Feed the task prompt via stdin (required by -p; also sends the task).
+    cmd.stdin(std::process::Stdio::piped());
+    cmd.stdout(std::process::Stdio::from(
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_file)
+            .unwrap_or_else(|_| std::fs::OpenOptions::new().create(true).append(true).open("/dev/null").unwrap()),
+    ));
+    cmd.stderr(std::process::Stdio::inherit());
     match cmd.spawn() {
-        Ok(child) => {
+        Ok(mut child) => {
+            if let Some(task) = task_path {
+                if let Some(mut stdin) = child.stdin.take() {
+                    use std::io::Write;
+                    let _ = stdin.write_all(task.as_bytes());
+                    drop(stdin);
+                }
+            }
             let pid = child.id();
             let _ = store.attach_pid(id, pid);
             let _ = store.update_status(id, AgentStatus::Running);

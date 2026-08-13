@@ -4,7 +4,6 @@
 
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Write};
-use std::os::fd::FromRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 
@@ -24,6 +23,8 @@ pub enum Request {
         task_path: Option<String>,
         repo: String,
         parent_id: Option<String>,
+        /// Per-arm peer prompt (plan §34: concealment is a benchmark variable).
+        prompt: Option<String>,
     },
     ListAgents,
     GetAgent { id: String },
@@ -68,37 +69,41 @@ pub fn send_request(socket: &Path, req: &Request) -> Result<Response, String> {
     serde_json::from_str(&resp).map_err(|e| e.to_string())
 }
 
-/// Serve requests on a Unix socket until the listener errors or we are asked
-/// to shut down. `handle` returns Ok(true) to continue or Ok(false) to stop.
-pub fn serve(
-    socket: &Path,
-    mut handle: impl FnMut(Request) -> Response,
-) -> std::io::Result<()> {
+/// Serve requests on a Unix socket, one thread per connection so a slow
+/// request (e.g. `anti wait` blocking for minutes) never stalls the accept
+/// loop — other clients (status/list/daemon) keep getting responses.
+pub fn serve<F>(socket: &Path, handle: F) -> std::io::Result<()>
+where
+    F: Fn(Request) -> Response + Send + Sync + 'static,
+{
     if socket.exists() {
         // Stale socket from a previous daemon; remove and rebind.
         std::fs::remove_file(socket)?;
     }
+    let handle = std::sync::Arc::new(handle);
     let listener = UnixListener::bind(socket)?;
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                let mut reader = BufReader::new(stream);
-                let mut line = String::new();
-                match reader.read_line(&mut line) {
-                    Ok(0) | Err(_) => continue,
-                    Ok(_) => {}
-                }
-                let resp = match serde_json::from_str::<Request>(&line) {
-                    Ok(req) => handle(req),
-                    Err(e) => Response::err("bad_request", format!("{e}")),
-                };
-                let mut out = serde_json::to_string(&resp).unwrap_or_else(|_| {
-                    serde_json::to_string(&Response::err("internal", "serialize")).unwrap()
+                let handle = handle.clone();
+                std::thread::spawn(move || {
+                    let mut reader = BufReader::new(stream);
+                    let mut line = String::new();
+                    match reader.read_line(&mut line) {
+                        Ok(0) | Err(_) => return,
+                        Ok(_) => {}
+                    }
+                    let resp = match serde_json::from_str::<Request>(&line) {
+                        Ok(req) => handle(req),
+                        Err(e) => Response::err("bad_request", format!("{e}")),
+                    };
+                    let mut out = serde_json::to_string(&resp).unwrap_or_else(|_| {
+                        serde_json::to_string(&Response::err("internal", "serialize")).unwrap()
+                    });
+                    out.push('\n');
+                    let mut stream = reader.into_inner();
+                    let _ = stream.write_all(out.as_bytes());
                 });
-                out.push('\n');
-                // Read-side is dropped above; write to the original stream
-                // via a raw dup of the file descriptor.
-                let _ = write_to_stream(reader.get_ref(), &out);
             }
             Err(_) => continue,
         }
@@ -106,14 +111,3 @@ pub fn serve(
     Ok(())
 }
 
-fn write_to_stream(stream: &UnixStream, data: &str) -> std::io::Result<()> {
-    use std::os::fd::AsRawFd;
-    let fd = stream.as_raw_fd();
-    let dup = unsafe { libc::dup(fd) };
-    if dup < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    let mut s = unsafe { UnixStream::from_raw_fd(dup) };
-    s.write_all(data.as_bytes())?;
-    Ok(())
-}

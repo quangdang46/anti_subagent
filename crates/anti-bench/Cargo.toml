@@ -1,0 +1,13 @@
+[package]
+name = "anti-bench"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "anti-bench"
+path = "src/main.rs"
+
+[dependencies]
+anti-core = { path = "../anti-core" }
+anti-daemon = { path = "../anti-daemon" }
+serde_json = "1"

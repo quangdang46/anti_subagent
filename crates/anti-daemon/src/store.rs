@@ -232,6 +232,14 @@ impl Store {
         Ok(())
     }
 
+    pub fn clear_workspace(&self, id: &str) -> Result<(), StoreError> {
+        self.conn.execute(
+            "UPDATE agents SET workspace_lease_id = NULL, workspace_path = NULL WHERE id = ?1",
+            rusqlite::params![id],
+        )?;
+        Ok(())
+    }
+
     pub fn set_workspace(&self, id: &str, lease_id: &str, path: &str) -> Result<(), StoreError> {
         self.conn.execute(
             "UPDATE agents SET workspace_lease_id = ?2, workspace_path = ?3, updated_at = datetime('now') WHERE id = ?1",

@@ -43,6 +43,7 @@ pub fn spawn(
             task_path: task.map(str::to_string),
             repo: repo.to_string(),
             parent_id: parent.map(str::to_string),
+            prompt: None,
         },
     )?;
     check(resp)
