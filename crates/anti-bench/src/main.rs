@@ -249,7 +249,7 @@ fn spawn_claude(repo: &str, task: &str, id: Option<&str>, _prompt_extra: Option<
             let wait_req = Request::WaitAgent {
                 id: agent_id.clone(),
                 until: "completed".to_string(),
-                timeout_secs: 1800,
+                timeout_secs: 3600,
             };
             match anti_daemon::ipc::send_request(&sock, &wait_req) {
                 Ok(Response::Ok(v)) => {

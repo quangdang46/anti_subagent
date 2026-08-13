@@ -435,6 +435,13 @@ fn spawn(
             return Response::err("workspace", e.to_string());
         }
     };
+    // Kill any stale process still running inside the freshly-leased worktree
+    // (e.g. an orphaned peer from a previous run whose lease was released but
+    // whose process survived). A stale process would make treehouse treat the
+    // worktree as in-use on the next acquire, starving the pool.
+    let _ = std::process::Command::new("pkill")
+        .args(["-f", &format!("claude -p.*{}", worktree.path.display())])
+        .status();
     let _ = store.set_workspace(id, &worktree.lease_id, &worktree.path.display().to_string());
 
     // 5-6. spawn the harness non-interactively inside the leased worktree
