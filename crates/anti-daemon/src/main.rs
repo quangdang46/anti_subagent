@@ -1,4 +1,4 @@
-use anti_adapters::{ClaudeCodeAdapter, CodexAdapter, HarnessAdapter, SpawnContext};
+use anti_adapters::{ClaudeCodeAdapter, CodexAdapter, HarnessAdapter, OpenCodeAdapter, SpawnContext};
 use anti_core::events::EventType;
 use anti_core::model::{AgentRecord, AgentStatus, Harness, Role};
 use anti_daemon::ipc::{self, Request, Response};
@@ -460,6 +460,7 @@ fn spawn(
     };
     let adapter: Box<dyn HarnessAdapter> = match harness {
         "codex" => Box::new(CodexAdapter),
+        "opencode" => Box::new(OpenCodeAdapter),
         _ => Box::new(ClaudeCodeAdapter),
     };
     let mut cmd = match adapter.spawn_command(&ctx) {

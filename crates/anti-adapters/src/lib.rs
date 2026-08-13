@@ -86,3 +86,26 @@ impl HarnessAdapter for CodexAdapter {
         Ok(cmd)
     }
 }
+
+/// OpenCode adapter (plan §25): `opencode run --format json [--session <id>]`
+/// with the task as the first argument (opengoat provider pattern).
+pub struct OpenCodeAdapter;
+
+impl HarnessAdapter for OpenCodeAdapter {
+    fn name(&self) -> &'static str {
+        "opencode"
+    }
+
+    fn spawn_command(&self, ctx: &SpawnContext) -> Result<Command, AdapterError> {
+        let mut cmd = Command::new("opencode");
+        cmd.args(["run", "--format", "json"]);
+        if let Some(task) = &ctx.task {
+            cmd.arg(task);
+        }
+        cmd.current_dir(&ctx.worktree);
+        cmd.stdin(std::process::Stdio::null());
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::inherit());
+        Ok(cmd)
+    }
+}
