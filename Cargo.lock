@@ -101,6 +101,7 @@ name = "anti-daemon"
 version = "0.1.0"
 dependencies = [
  "anti-core",
+ "anti-workspace",
  "chrono",
  "libc",
  "rusqlite",

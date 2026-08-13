@@ -232,6 +232,56 @@ impl Store {
         Ok(())
     }
 
+    pub fn set_workspace(&self, id: &str, lease_id: &str, path: &str) -> Result<(), StoreError> {
+        self.conn.execute(
+            "UPDATE agents SET workspace_lease_id = ?2, workspace_path = ?3, updated_at = datetime('now') WHERE id = ?1",
+            rusqlite::params![id, lease_id, path],
+        )?;
+        Ok(())
+    }
+
+    pub fn inc_restart(&self, id: &str) -> Result<(), StoreError> {
+        self.conn.execute(
+            "UPDATE agents SET restart_count = restart_count + 1, updated_at = datetime('now') WHERE id = ?1",
+            rusqlite::params![id],
+        )?;
+        Ok(())
+    }
+
+    /// Mark an exited process: RUNNING/BLOCKED → Completed (exit 0) or Crashed.
+    pub fn mark_exit(&mut self, id: &str, exit_ok: bool) -> Result<(), StoreError> {
+        let _rec = self
+            .get_agent(id)?
+            .ok_or(StoreError::Transition(
+                anti_core::statemachine::TransitionError::InvalidTransition {
+                    from: AgentStatus::Created,
+                    to: AgentStatus::Completed,
+                },
+            ))?;
+        let to = if exit_ok {
+            AgentStatus::Completed
+        } else {
+            AgentStatus::Crashed
+        };
+        let changed = self.conn.execute(
+            "UPDATE agents SET status = ?2, updated_at = datetime('now') WHERE id = ?1 AND status IN ('Running', 'Blocked', 'Starting')",
+            rusqlite::params![id, format!("{:?}", to)],
+        )?;
+        if changed == 0 {
+            return Ok(()); // already terminal — nothing to do
+        }
+        self.append_event(
+            id,
+            if exit_ok {
+                EventType::AgentCompleted
+            } else {
+                EventType::AgentCrashed
+            },
+            serde_json::json!({}),
+        )?;
+        Ok(())
+    }
+
     // ---- events ----
 
     pub fn append_event(&mut self, agent_id: &str, type_: EventType, payload: serde_json::Value) -> Result<Event, StoreError> {

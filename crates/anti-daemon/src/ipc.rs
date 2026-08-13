@@ -14,6 +14,8 @@ pub const SOCKET_NAME: &str = "anti.sock";
 #[serde(tag = "method", content = "params")]
 pub enum Request {
     Ping,
+    /// Guard policy query (fail-closed: only reachable while daemon is up).
+    GuardCheck { tool: String },
     SpawnAgent {
         id: String,
         role: String,

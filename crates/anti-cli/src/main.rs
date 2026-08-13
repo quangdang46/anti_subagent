@@ -66,8 +66,30 @@ enum Commands {
         #[command(subcommand)]
         action: DaemonAction,
     },
+    /// Manage the peer guard (deny delegation-shaped tools in peers)
+    Guard {
+        #[command(subcommand)]
+        action: GuardAction,
+    },
     /// Check daemon, state dir, treehouse, claude
     Doctor,
+}
+
+#[derive(Subcommand)]
+enum GuardAction {
+    /// Install the PreToolUse guard into a peer workspace's .claude/hooks.json
+    Install {
+        /// Workspace (worktree) path to install into
+        #[arg(long)]
+        workspace: String,
+    },
+    /// Classify a tool name (allow/deny) without installing
+    Test {
+        #[arg(long)]
+        tool: String,
+    },
+    /// Show guard status
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -101,6 +123,7 @@ fn main() {
         Commands::Status { id } => commands::status(&state_dir, &id),
         Commands::Wait { id, until, timeout } => commands::wait(&state_dir, &id, &until, timeout),
         Commands::Daemon { action } => commands::daemon(&state_dir, action),
+        Commands::Guard { action } => commands::guard(&state_dir, action),
         Commands::Doctor => commands::doctor(&state_dir),
     };
 

@@ -159,6 +159,75 @@ pub fn daemon(state_dir: &PathBuf, action: crate::DaemonAction) -> Result<String
     }
 }
 
+pub fn guard(state_dir: &PathBuf, action: crate::GuardAction) -> Result<String, String> {
+    match action {
+        crate::GuardAction::Test { tool } => {
+            // Local classification (mirrors the guard script's stem scan).
+            let normalized: String = tool
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric())
+                .flat_map(|c| c.to_lowercase())
+                .collect();
+            let stems = [
+                "agent", "subagent", "task", "workflow", "cron", "schedul", "worktree",
+                "delegate", "spawn", "dispatch", "handoff", "remote", "sendmessage", "monitor",
+            ];
+            let matched = stems.iter().find(|s| normalized.contains(**s));
+            Ok(match matched {
+                Some(s) => format!("deny (delegation-shaped, stem '{s}')"),
+                None => "allow".to_string(),
+            })
+        }
+        crate::GuardAction::Install { workspace } => {
+            let ws = std::path::Path::new(&workspace);
+            if !ws.is_dir() {
+                return Err(format!("workspace does not exist: {workspace}"));
+            }
+            let claude_dir = ws.join(".claude");
+            std::fs::create_dir_all(&claude_dir).map_err(|e| e.to_string())?;
+            let hooks_path = claude_dir.join("hooks.json");
+            let guard_script = std::env::var("HOME")
+                .map(|h| format!("{h}/.anti_subagent/guard/anti-guard.sh"))
+                .unwrap_or_else(|_| "anti-guard.sh".to_string());
+            let existing = if hooks_path.exists() {
+                std::fs::read_to_string(&hooks_path).unwrap_or_else(|_| "{}".to_string())
+            } else {
+                "{}".to_string()
+            };
+            let mut v: serde_json::Value =
+                serde_json::from_str(&existing).map_err(|e| format!("invalid hooks.json: {e}"))?;
+            let hooks = v
+                .as_object_mut()
+                .ok_or("hooks.json must be an object")?;
+            hooks.insert(
+                "PreToolUse".to_string(),
+                serde_json::json!([
+                    {
+                        "matcher": ".*",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": format!("{guard_script} --claude")
+                            }
+                        ]
+                    }
+                ]),
+            );
+            std::fs::write(&hooks_path, serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?)
+                .map_err(|e| e.to_string())?;
+            Ok(format!("guard installed at {}", hooks_path.display()))
+        }
+        crate::GuardAction::Status => {
+            let sock = socket(state_dir);
+            if sock.exists() && daemon_running(state_dir) {
+                Ok("guard: daemon up — fail-closed active (delegation tools denied)".to_string())
+            } else {
+                Ok("guard: daemon DOWN — guard fails closed (delegation tools denied locally)".to_string())
+            }
+        }
+    }
+}
+
 pub fn doctor(state_dir: &PathBuf) -> Result<String, String> {
     let mut lines = vec![format!("state_dir: {}", state_dir.display())];
     lines.push(if daemon_running(state_dir) {
