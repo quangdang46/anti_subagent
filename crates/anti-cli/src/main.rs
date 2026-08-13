@@ -61,6 +61,12 @@ enum Commands {
         #[arg(long, default_value_t = 3600)]
         timeout: u64,
     },
+    /// Graceful stop (SIGTERM)
+    Stop { id: String },
+    /// Force kill (SIGKILL)
+    Kill { id: String },
+    /// Supervised restart of a crashed agent (same id)
+    Restart { id: String },
     /// Manage the control-plane daemon
     Daemon {
         #[command(subcommand)]
@@ -122,6 +128,9 @@ fn main() {
         Commands::List { role, status, json } => commands::list(&state_dir, role.as_deref(), status.as_deref(), json),
         Commands::Status { id } => commands::status(&state_dir, &id),
         Commands::Wait { id, until, timeout } => commands::wait(&state_dir, &id, &until, timeout),
+        Commands::Stop { id } => commands::stop(&state_dir, &id, false),
+        Commands::Kill { id } => commands::stop(&state_dir, &id, true),
+        Commands::Restart { id } => commands::restart(&state_dir, &id),
         Commands::Daemon { action } => commands::daemon(&state_dir, action),
         Commands::Guard { action } => commands::guard(&state_dir, action),
         Commands::Doctor => commands::doctor(&state_dir),

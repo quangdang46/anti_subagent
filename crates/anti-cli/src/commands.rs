@@ -115,6 +115,31 @@ pub fn wait(state_dir: &PathBuf, id: &str, until: &str, timeout: u64) -> Result<
     check(resp)
 }
 
+pub fn stop(state_dir: &PathBuf, id: &str, force: bool) -> Result<String, String> {
+    if !daemon_running(state_dir) {
+        return Err("daemon not running — start it first with `anti daemon start`".into());
+    }
+    let resp = ipc::send_request(
+        &socket(state_dir),
+        &Request::StopAgent {
+            id: id.to_string(),
+            force,
+        },
+    )?;
+    check(resp)
+}
+
+pub fn restart(state_dir: &PathBuf, id: &str) -> Result<String, String> {
+    if !daemon_running(state_dir) {
+        return Err("daemon not running — start it first with `anti daemon start`".into());
+    }
+    let resp = ipc::send_request(
+        &socket(state_dir),
+        &Request::RestartAgent { id: id.to_string() },
+    )?;
+    check(resp)
+}
+
 pub fn daemon(state_dir: &PathBuf, action: crate::DaemonAction) -> Result<String, String> {
     match action {
         crate::DaemonAction::Start => {

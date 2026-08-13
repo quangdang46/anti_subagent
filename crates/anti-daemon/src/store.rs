@@ -248,6 +248,41 @@ impl Store {
         Ok(())
     }
 
+    /// Recovery state transitions (plan §17): CRASHED → RECOVERING → RUNNING
+    /// keeps the same id/workspace/task — replacement is a governance
+    /// decision, never an implicit respawn.
+    pub fn begin_recovery(&self, id: &str) -> Result<(), StoreError> {
+        let changed = self.conn.execute(
+            "UPDATE agents SET status = 'Recovering', updated_at = datetime('now') WHERE id = ?1 AND status = 'Crashed'",
+            rusqlite::params![id],
+        )?;
+        if changed == 0 {
+            return Err(StoreError::Transition(
+                anti_core::statemachine::TransitionError::InvalidTransition {
+                    from: AgentStatus::Crashed,
+                    to: AgentStatus::Recovering,
+                },
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn set_running(&self, id: &str, pid: u32) -> Result<(), StoreError> {
+        let changed = self.conn.execute(
+            "UPDATE agents SET status = 'Running', pid = ?2, updated_at = datetime('now') WHERE id = ?1",
+            rusqlite::params![id, pid],
+        )?;
+        if changed == 0 {
+            return Err(StoreError::Transition(
+                anti_core::statemachine::TransitionError::InvalidTransition {
+                    from: AgentStatus::Recovering,
+                    to: AgentStatus::Running,
+                },
+            ));
+        }
+        Ok(())
+    }
+
     /// Mark an exited process: RUNNING/BLOCKED → Completed (exit 0) or Crashed.
     pub fn mark_exit(&mut self, id: &str, exit_ok: bool) -> Result<(), StoreError> {
         let _rec = self

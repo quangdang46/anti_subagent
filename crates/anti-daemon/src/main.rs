@@ -78,6 +78,40 @@ fn main() {
                     Err(e) => Response::err("wait", e),
                 }
             }
+            Request::StopAgent { id, force } => {
+                let mut cmd = std::process::Command::new("kill");
+                if force {
+                    cmd.arg("-9");
+                } else {
+                    cmd.arg("-TERM");
+                }
+                cmd.arg(&id);
+                // find the pid from the registry
+                let pid = store.get_agent(&id).ok().flatten().and_then(|r| r.pid);
+                match pid {
+                    Some(pid) => {
+                        let st = std::process::Command::new("kill")
+                            .args([if force { "-9" } else { "-TERM" }, &pid.to_string()])
+                            .status();
+                        match st {
+                            Ok(s) if s.success() => {
+                                let _ = store.update_status(&id, AgentStatus::Stopped);
+                                let _ = store.append_event(&id, EventType::AgentStopped, json!({"force": force}));
+                                Response::ok(json!({"id": id, "status": "stopped"}))
+                            }
+                            Ok(_) => Response::err("stop", format!("kill returned failure for {id}")),
+                            Err(e) => Response::err("stop", e.to_string()),
+                        }
+                    }
+                    None => Response::err("not_found", format!("no pid for {id}")),
+                }
+            }
+            Request::RestartAgent { id } => {
+                match restart_agent(store, children, &id) {
+                    Ok(pid) => Response::ok(json!({"id": id, "status": "restarting", "pid": pid})),
+                    Err(e) => Response::err("restart", e),
+                }
+            }
         }
     };
 
@@ -151,6 +185,64 @@ fn reap_children(store: &mut Store, children: &mut HashMap<String, Child>) {
             }
         }
     }
+}
+
+/// Supervised restart (plan §17, §23): CRASHED → RECOVERING → RUNNING with
+/// the SAME id, workspace, and task. Replacement is a governance decision —
+/// a supervised restart never issues a new id.
+fn restart_agent(
+    store: &mut Store,
+    children: &mut HashMap<String, Child>,
+    id: &str,
+) -> Result<u32, String> {
+    let rec = store
+        .get_agent(id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("agent {id} not found"))?;
+    if !matches!(rec.status, AgentStatus::Crashed | AgentStatus::Recovering) {
+        return Err(format!("agent {id} is {:?}, cannot restart", rec.status));
+    }
+
+    let _ = store.begin_recovery(id);
+    let _ = store.append_event(id, EventType::AgentRestarted, json!({"restart_count": rec.restart_count + 1}));
+
+    // Backoff: 1s * 2^restart_count (cap 30s) so a crash-loop doesn't spin.
+    let backoff = std::time::Duration::from_secs((1u64 << rec.restart_count.min(5)).min(30));
+    std::thread::sleep(backoff);
+
+    let repo = rec
+        .workspace
+        .as_ref()
+        .map(|ws| ws.path.clone())
+        .unwrap_or_else(|| {
+            std::env::current_dir()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| ".".to_string())
+        });
+
+    let mut cmd = std::process::Command::new("script");
+    let log_path = std::env::var("HOME")
+        .map(|h| PathBuf::from(h).join(".anti_subagent/logs"))
+        .unwrap_or_else(|_| PathBuf::from("/tmp/anti_logs"));
+    std::fs::create_dir_all(&log_path).ok();
+    let log_file = log_path.join(format!("{id}.log"));
+    cmd.args([
+        "-q",
+        log_file.to_str().unwrap_or("/dev/null"),
+        "claude",
+        "--permission-mode",
+        "acceptEdits",
+        "--append-system-prompt",
+        "You are a peer working on this repository with the project owner. Work independently.",
+    ]);
+    cmd.current_dir(&repo);
+    let child = cmd.spawn().map_err(|e| e.to_string())?;
+    let pid = child.id();
+    let _ = store.inc_restart(id);
+    let _ = store.set_running(id, pid);
+    let _ = store.append_event(id, EventType::AgentStarted, json!({"pid": pid, "restart": true}));
+    children.insert(id.to_string(), child);
+    Ok(pid)
 }
 
 /// Spawn an agent with full plan §18 transaction: validate → reserve →

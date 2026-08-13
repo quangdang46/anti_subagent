@@ -28,6 +28,8 @@ pub enum Request {
     ListAgents,
     GetAgent { id: String },
     WaitAgent { id: String, until: String, timeout_secs: u64 },
+    StopAgent { id: String, force: bool },
+    RestartAgent { id: String },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
