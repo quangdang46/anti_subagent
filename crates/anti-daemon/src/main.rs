@@ -1,3 +1,4 @@
+use anti_adapters::{ClaudeCodeAdapter, CodexAdapter, HarnessAdapter, SpawnContext};
 use anti_core::events::EventType;
 use anti_core::model::{AgentRecord, AgentStatus, Harness, Role};
 use anti_daemon::ipc::{self, Request, Response};
@@ -162,7 +163,7 @@ fn main() {
                 std::path::Path::new(&path),
                 std::path::Path::new(&path),
             );
-            if let Ok(mut s) = sweeper_store.lock() {
+            if let Ok(s) = sweeper_store.lock() {
                 let _ = s.clear_workspace(&id);
             }
         }
@@ -431,7 +432,6 @@ fn spawn(
     let _ = store.set_workspace(id, &worktree.lease_id, &worktree.path.display().to_string());
 
     // 5-6. spawn the harness non-interactively inside the leased worktree
-    let mut cmd = std::process::Command::new("claude");
     let log_path = std::env::var("HOME")
         .map(|h| PathBuf::from(h).join(".anti_subagent/logs"))
         .unwrap_or_else(|_| PathBuf::from("/tmp/anti_logs"));
@@ -446,19 +446,23 @@ fn spawn(
     let peer_prompt = prompt.unwrap_or(
         "You are a peer working on this repository with the project owner. Work independently.",
     );
-    cmd.args([
-        "-p",
-        "--output-format",
-        "json",
-        "--permission-mode",
-        "acceptEdits",
-        "--dangerously-skip-permissions",
-        "--append-system-prompt",
-        peer_prompt,
-    ]);
-    cmd.current_dir(&worktree.path);
-    // Feed the task prompt via stdin (required by -p; also sends the task).
-    cmd.stdin(std::process::Stdio::piped());
+    // Harness adapter dispatch (plan §25).
+    let ctx = SpawnContext {
+        worktree: worktree.path.clone(),
+        task: task_path.map(str::to_string),
+        peer_prompt: Some(peer_prompt.to_string()),
+    };
+    let adapter: Box<dyn HarnessAdapter> = match harness {
+        "codex" => Box::new(CodexAdapter),
+        _ => Box::new(ClaudeCodeAdapter),
+    };
+    let mut cmd = match adapter.spawn_command(&ctx) {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = store.update_status(id, AgentStatus::Failed);
+            return Response::err("spawn", e.to_string());
+        }
+    };
     cmd.stdout(std::process::Stdio::from(
         std::fs::OpenOptions::new()
             .create(true)
@@ -466,9 +470,9 @@ fn spawn(
             .open(&log_file)
             .unwrap_or_else(|_| std::fs::OpenOptions::new().create(true).append(true).open("/dev/null").unwrap()),
     ));
-    cmd.stderr(std::process::Stdio::inherit());
     match cmd.spawn() {
         Ok(mut child) => {
+            // Feed the task prompt via stdin for pipe-fed CLIs (claude -p).
             if let Some(task) = task_path {
                 if let Some(mut stdin) = child.stdin.take() {
                     use std::io::Write;

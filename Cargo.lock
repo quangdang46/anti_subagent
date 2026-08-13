@@ -74,6 +74,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "anti-adapters"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "thiserror",
+]
+
+[[package]]
 name = "anti-bench"
 version = "0.1.0"
 dependencies = [
@@ -109,6 +117,7 @@ dependencies = [
 name = "anti-daemon"
 version = "0.1.0"
 dependencies = [
+ "anti-adapters",
  "anti-core",
  "anti-workspace",
  "chrono",
