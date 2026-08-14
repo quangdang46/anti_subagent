@@ -576,3 +576,164 @@ fn parse_status(s: &str) -> Option<AgentStatus> {
         _ => return None,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::Value;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::{Mutex, OnceLock};
+
+    fn test_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("{prefix}-{}-{nanos}", std::process::id()));
+        fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    #[cfg(unix)]
+    fn write_executable(path: &std::path::Path, content: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        fs::write(path, content).expect("write script");
+        let mut perms = fs::metadata(path).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(path, perms).expect("chmod");
+    }
+
+    #[test]
+    fn spawn_agent_persists_and_runs() {
+        let _guard = test_lock().lock().expect("lock test");
+        let root = unique_temp_dir("anti-daemon-spawn");
+        let state_dir = root.join("state");
+        let repo_dir = root.join("repo");
+        let worktree_dir = root.join("worktree");
+        let bin_dir = root.join("bin");
+        fs::create_dir_all(&state_dir).expect("state dir");
+        fs::create_dir_all(&repo_dir).expect("repo dir");
+        fs::create_dir_all(&worktree_dir).expect("worktree dir");
+        fs::create_dir_all(&bin_dir).expect("bin dir");
+
+        let treehouse_bin = bin_dir.join("treehouse");
+        write_executable(
+            &treehouse_bin,
+            r#"#!/bin/sh
+if [ "$1" = "get" ]; then
+  echo "{\"path\":\"$TEST_WORKTREE\",\"lease_id\":\"lease-123\"}"
+  exit 0
+fi
+if [ "$1" = "return" ]; then
+  exit 0
+fi
+if [ "$1" = "status" ]; then
+  echo "[]"
+  exit 0
+fi
+exit 1
+"#,
+        );
+        let codex_bin = bin_dir.join("codex");
+        write_executable(
+            &codex_bin,
+            r#"#!/bin/sh
+sleep 5
+"#,
+        );
+
+        let old_treehouse = std::env::var_os("TREEHOUSE_BIN");
+        let old_worktree = std::env::var_os("TEST_WORKTREE");
+        let old_path = std::env::var_os("PATH");
+        let path = format!(
+            "{}:{}",
+            bin_dir.display(),
+            old_path
+                .as_ref()
+                .map(|v| v.to_string_lossy().to_string())
+                .unwrap_or_default()
+        );
+
+        unsafe {
+            std::env::set_var("TREEHOUSE_BIN", &treehouse_bin);
+            std::env::set_var("TEST_WORKTREE", &worktree_dir);
+            std::env::set_var("PATH", path);
+        }
+
+        let mut store = Store::open(&state_dir).expect("open store");
+        let mut children = HashMap::new();
+        let id = "peer-spawn-1";
+        let response = spawn(
+            &mut store,
+            &mut children,
+            id,
+            "peer",
+            None,
+            "codex",
+            Some("test task"),
+            repo_dir.to_str().expect("repo path"),
+            None,
+            None,
+        );
+        let data = match response {
+            Response::Ok(v) => v,
+            Response::Err { code, message } => panic!("unexpected spawn error {code}: {message}"),
+        };
+        assert_eq!(data.get("id"), Some(&Value::String(id.to_string())));
+        assert_eq!(data.get("status"), Some(&Value::String("running".to_string())));
+        assert!(data.get("pid").and_then(Value::as_u64).is_some());
+
+        let rec = store
+            .get_agent(id)
+            .expect("read agent")
+            .expect("agent exists");
+        assert_eq!(rec.status, AgentStatus::Running);
+        assert!(rec.pid.is_some());
+        let workspace = rec.workspace.expect("workspace recorded");
+        assert_eq!(workspace.lease_id, "lease-123");
+        assert_eq!(workspace.path, worktree_dir.display().to_string());
+
+        let duplicate = spawn(
+            &mut store,
+            &mut children,
+            id,
+            "peer",
+            None,
+            "codex",
+            Some("test task"),
+            repo_dir.to_str().expect("repo path"),
+            None,
+            None,
+        );
+        match duplicate {
+            Response::Err { code, .. } => assert_eq!(code, "duplicate"),
+            Response::Ok(v) => panic!("expected duplicate error, got success: {v}"),
+        }
+
+        for mut child in children.into_values() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+
+        match old_treehouse {
+            Some(v) => unsafe { std::env::set_var("TREEHOUSE_BIN", v) },
+            None => unsafe { std::env::remove_var("TREEHOUSE_BIN") },
+        }
+        match old_worktree {
+            Some(v) => unsafe { std::env::set_var("TEST_WORKTREE", v) },
+            None => unsafe { std::env::remove_var("TEST_WORKTREE") },
+        }
+        match old_path {
+            Some(v) => unsafe { std::env::set_var("PATH", v) },
+            None => unsafe { std::env::remove_var("PATH") },
+        }
+
+        let _ = fs::remove_dir_all(root);
+    }
+}
