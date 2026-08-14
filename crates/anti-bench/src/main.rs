@@ -271,7 +271,15 @@ fn short(s: &str) -> String {
 }
 
 /// A stable per-process run index so ids never collide across runs.
+/// The process start time (seconds since epoch) makes ids unique across
+/// separate bench invocations — a counter alone restarts at 0 each run.
 fn run_index() -> u64 {
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    // Start time of this process, best-effort (falls back to 0).
+    let start = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    (start % 100_000) * 1000 + n
 }
