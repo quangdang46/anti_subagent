@@ -309,3 +309,34 @@ pub fn doctor(state_dir: &PathBuf) -> Result<String, String> {
 
     Ok(lines.join("\n"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::guard;
+    use crate::GuardAction;
+    use std::path::PathBuf;
+
+    #[test]
+    fn guard_test_denies_task_tool_names() {
+        let out = guard(
+            &PathBuf::from("/tmp/unused"),
+            GuardAction::Test {
+                tool: "task-runner".to_string(),
+            },
+        )
+        .expect("guard test should succeed");
+        assert_eq!(out, "deny (delegation-shaped, stem 'task')");
+    }
+
+    #[test]
+    fn guard_test_allows_non_delegation_tool_names() {
+        let out = guard(
+            &PathBuf::from("/tmp/unused"),
+            GuardAction::Test {
+                tool: "editor".to_string(),
+            },
+        )
+        .expect("guard test should succeed");
+        assert_eq!(out, "allow");
+    }
+}
