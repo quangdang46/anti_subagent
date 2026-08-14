@@ -11,7 +11,34 @@ use std::path::PathBuf;
 use std::process::Child;
 use std::time::Duration;
 
+/// Daemonize: detach from the parent's process group/session so a killed
+/// parent shell (e.g. a timed-out Bash tool call) never takes the daemon
+/// down with it. macOS has no `setsid` binary, so we do it in-process.
+#[cfg(unix)]
+fn daemonize() {
+    use std::os::unix::process::CommandExt;
+    if std::env::var("ANTI_DAEMONIZED").is_ok() {
+        return; // already detached
+    }
+    // Fork via spawning ourselves detached with the flag set.
+    let exe = std::env::current_exe().unwrap_or_default();
+    let mut cmd = std::process::Command::new(&exe);
+    cmd.env("ANTI_DAEMONIZED", "1");
+    for (k, v) in std::env::vars() {
+        if k != "ANTI_DAEMONIZED" {
+            cmd.env(k, v);
+        }
+    }
+    cmd.stdin(std::process::Stdio::null());
+    cmd.stdout(std::process::Stdio::null());
+    cmd.stderr(std::process::Stdio::null());
+    cmd.process_group(0); // new process group
+    let _ = cmd.spawn();
+    std::process::exit(0);
+}
+
 fn main() {
+    daemonize();
     let state_dir = std::env::var("ANTI_STATE_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
