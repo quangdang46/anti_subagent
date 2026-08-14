@@ -162,15 +162,18 @@ fn run_arm(arm: Arm, repo: &str, task: &str) -> RunMetrics {
     let start = std::time::Instant::now();
     let mut m = RunMetrics::default();
 
+    // Unique id per run so reruns never collide with stale records/events.
+    let idx = run_index();
     match arm {
         Arm::A => {
             // Native subagent: a single harness-native agent (no SLP) —
             // represented by one plain claude run with the task inline.
-            m.task_success = spawn_claude(repo, task, None, Some(task));
+            let id = format!("bench-a-{}-{}", idx, short(task));
+            m.task_success = spawn_claude(repo, task, Some(&id), Some(task));
         }
         Arm::B => {
             // Flat full-agent: independent OS-process peers, disclosed.
-            let id = format!("bench-b-{}-{}", run_index(), short(task));
+            let id = format!("bench-b-{}-{}", idx, short(task));
             m.task_success = spawn_claude(repo, task, Some(&id), Some(&format!(
                 "You are a peer agent in a flat team working with the project owner. \
                  Complete this task independently.\n\nTASK: {task}"
@@ -178,14 +181,14 @@ fn run_arm(arm: Arm, repo: &str, task: &str) -> RunMetrics {
         }
         Arm::C => {
             // SLP concealed: independent peer, hierarchy invisible.
-            let id = format!("bench-c-{}-{}", run_index(), short(task));
+            let id = format!("bench-c-{}-{}", idx, short(task));
             m.task_success = spawn_claude(repo, task, Some(&id), Some(&format!(
                 "You are working with the project owner on this repository. Complete this task.\n\nTASK: {task}"
             )));
         }
         Arm::D => {
             // SLP disclosed: same substrate, hierarchy visible.
-            let id = format!("bench-d-{}-{}", run_index(), short(task));
+            let id = format!("bench-d-{}-{}", idx, short(task));
             m.task_success = spawn_claude(repo, task, Some(&id), Some(&format!(
                 "You are a peer in an SLP hierarchy: a Supervisor monitors, a Lead coordinates. \
                  Complete this task under the Lead's direction.\n\nTASK: {task}"
@@ -200,11 +203,12 @@ fn run_arm(arm: Arm, repo: &str, task: &str) -> RunMetrics {
         .unwrap_or_else(|_| PathBuf::from("."));
     let ev_file = state_dir.join("events/events.jsonl");
     if let Ok(raw) = std::fs::read_to_string(&ev_file) {
+        // The arm-specific run id matches the one used for the spawn above.
         let agent_id = match arm {
-            Arm::A => format!("bench-{}", short(task)),
-            Arm::B => format!("bench-b-{}", short(task)),
-            Arm::C => format!("bench-c-{}", short(task)),
-            Arm::D => format!("bench-d-{}", short(task)),
+            Arm::A => format!("bench-a-{}-{}", idx, short(task)),
+            Arm::B => format!("bench-b-{}-{}", idx, short(task)),
+            Arm::C => format!("bench-c-{}-{}", idx, short(task)),
+            Arm::D => format!("bench-d-{}-{}", idx, short(task)),
         };
         for line in raw.lines() {
             if let Ok(e) = serde_json::from_str::<serde_json::Value>(line) {
