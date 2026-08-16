@@ -5,3 +5,4 @@ pub mod config;
 pub mod events;
 pub mod model;
 pub mod statemachine;
+pub mod work;
