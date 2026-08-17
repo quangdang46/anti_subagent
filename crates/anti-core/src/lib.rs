@@ -6,6 +6,7 @@ pub mod capsule;
 pub mod config;
 pub mod disposition;
 pub mod events;
+pub mod routing;
 pub mod loopprev;
 pub mod model;
 pub mod statemachine;
