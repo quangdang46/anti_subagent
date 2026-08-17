@@ -47,6 +47,10 @@ pub enum Request {
         note: String,
     },
     ListWorkItems,
+    VerifyWork {
+        id: String,
+        profile: String, // "full", "check", "test", "build", or "named:<name>"
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]

@@ -172,6 +172,100 @@ pub enum VerificationStatus {
     Uncertain,
 }
 
+/// Verification profiles — predefined check sets, NOT arbitrary commands.
+/// Prevents execution escape hatch (caller can't inject arbitrary CLI).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum VerifyProfile {
+    /// cargo fmt --check + cargo clippy + cargo test + cargo build
+    Full,
+    /// cargo fmt --check + cargo clippy + cargo test
+    Check,
+    /// cargo test only
+    Test,
+    /// cargo build only
+    Build,
+    /// Custom profile defined in project config (.anti_subagent/verify.toml)
+    Named(String),
+}
+
+impl VerifyProfile {
+    /// Returns the cargo commands to run for this profile.
+    pub fn commands(&self) -> Vec<&'static str> {
+        match self {
+            VerifyProfile::Full => vec![
+                "cargo fmt --check",
+                "cargo clippy -- -D warnings",
+                "cargo test",
+                "cargo build",
+            ],
+            VerifyProfile::Check => vec![
+                "cargo fmt --check",
+                "cargo clippy -- -D warnings",
+                "cargo test",
+            ],
+            VerifyProfile::Test => vec!["cargo test"],
+            VerifyProfile::Build => vec!["cargo build"],
+            VerifyProfile::Named(_) => vec![], // loaded from config at runtime
+        }
+    }
+}
+
+/// Result of a verification run — comprehensive evidence for audit trail.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VerificationResult {
+    pub status: VerifyStatus,
+    pub profile: VerifyProfile,
+    pub test_output: Option<String>,
+    pub test_exit_code: Option<i32>,
+    pub build_output: Option<String>,
+    pub build_exit_code: Option<i32>,
+    pub diagnostics: Vec<String>,
+    pub git_diff: Option<String>,
+    pub git_sha: Option<String>,
+    pub claims_verified: Vec<ClaimVerification>,
+    pub timestamp: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VerifyStatus {
+    Pass,
+    Fail,
+    Incomplete,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClaimVerification {
+    pub claim: String,
+    pub status: VerifyClaimStatus,
+    pub evidence: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VerifyClaimStatus {
+    Verified,
+    Partial,
+    Missing,
+}
+
+impl VerificationResult {
+    pub fn new(profile: VerifyProfile) -> Self {
+        Self {
+            status: VerifyStatus::Incomplete,
+            profile,
+            test_output: None,
+            test_exit_code: None,
+            build_output: None,
+            build_exit_code: None,
+            diagnostics: Vec::new(),
+            git_diff: None,
+            git_sha: None,
+            claims_verified: Vec::new(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+        }
+    }
+}
+
 /// Bảng chuyển trạng thái — mọi thứ không liệt kê = bất hợp pháp.
 pub fn can_transition(from: WorkItemState, to: WorkItemState) -> bool {
     use WorkItemState::*;

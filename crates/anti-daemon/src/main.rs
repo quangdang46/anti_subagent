@@ -185,6 +185,9 @@ fn main() {
             Request::ReviewWork { id, verdict, note } => {
                 handle_review_work(store, &id, &verdict, &note)
             }
+            Request::VerifyWork { id, profile } => {
+                handle_verify_work(store, &id, &profile)
+            }
             Request::ListWorkItems => {
                 match store.list_work_items(None) {
                     Ok(items) => Response::ok(items),
@@ -418,6 +421,114 @@ fn handle_review_work(
         }
         other => Response::err("invalid", format!("unknown verdict '{other}' — use 'accept' or 'reject'")),
     }
+}
+
+fn handle_verify_work(store: &mut Store, id: &str, profile_str: &str) -> Response {
+    use anti_core::work::{VerifyProfile, VerificationResult, VerifyStatus};
+
+    let mut w = match store.get_work_item(id) {
+        Ok(Some(w)) => w,
+        Ok(None) => return Response::err("not_found", format!("work item {id} not found")),
+        Err(e) => return Response::err("store", e.to_string()),
+    };
+
+    if w.state != anti_core::work::WorkItemState::Submitted {
+        return Response::err("precondition", "verify requires Submitted state");
+    }
+
+    let profile = match profile_str {
+        "full" => VerifyProfile::Full,
+        "check" => VerifyProfile::Check,
+        "test" => VerifyProfile::Test,
+        "build" => VerifyProfile::Build,
+        other if other.starts_with("named:") => {
+            VerifyProfile::Named(other.strip_prefix("named:").unwrap_or("").to_string())
+        }
+        _ => return Response::err("invalid", format!("unknown profile '{profile_str}' — use full/check/test/build/named:<name>")),
+    };
+
+    let mut result = VerificationResult::new(profile.clone());
+    let mut all_pass = true;
+
+    // Run each command in the profile
+    for cmd in profile.commands() {
+        let parts: Vec<&str> = cmd.split_whitespace().collect();
+        if parts.is_empty() {
+            continue;
+        }
+        let program = parts[0];
+        let args = &parts[1..];
+
+        let output = std::process::Command::new(program)
+            .args(args)
+            .output();
+
+        match output {
+            Ok(out) => {
+                let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+                let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+                let combined = format!("{stdout}\n{stderr}");
+                let code = out.status.code().unwrap_or(-1);
+
+                if cmd.contains("test") {
+                    result.test_output = Some(combined.clone());
+                    result.test_exit_code = Some(code);
+                } else if cmd.contains("build") {
+                    result.build_output = Some(combined.clone());
+                    result.build_exit_code = Some(code);
+                }
+
+                if !out.status.success() {
+                    all_pass = false;
+                    result.diagnostics.push(format!("[{cmd}] exit {code}: {stderr}"));
+                }
+            }
+            Err(e) => {
+                all_pass = false;
+                result.diagnostics.push(format!("[{cmd}] failed to execute: {e}"));
+            }
+        }
+    }
+
+    // Capture git state
+    if let Ok(out) = std::process::Command::new("git").args(["rev-parse", "HEAD"]).output() {
+        result.git_sha = Some(String::from_utf8_lossy(&out.stdout).trim().to_string());
+    }
+    if let Ok(out) = std::process::Command::new("git").args(["diff", "--stat"]).output() {
+        let diff = String::from_utf8_lossy(&out.stdout).to_string();
+        if !diff.trim().is_empty() {
+            result.git_diff = Some(diff);
+        }
+    }
+
+    result.status = if all_pass { VerifyStatus::Pass } else { VerifyStatus::Fail };
+
+    // Transition state based on verification result
+    let new_state = if all_pass {
+        anti_core::work::WorkItemState::Verified
+    } else {
+        // Stay at Submitted on failure — peer must fix and resubmit
+        anti_core::work::WorkItemState::Submitted
+    };
+
+    if let Err(e) = w.transition(new_state) {
+        return Response::err("transition", e.to_string());
+    }
+
+    let _ = store.insert_work_item(&w);
+    let _ = store.append_event(id, EventType::WorkVerified, json!({
+        "status": format!("{:?}", result.status),
+        "profile": format!("{:?}", result.profile),
+        "diagnostics_count": result.diagnostics.len(),
+    }));
+
+    Response::ok(json!({
+        "id": id,
+        "status": format!("{:?}", result.status),
+        "state": format!("{:?}", w.state),
+        "profile": profile_str,
+        "diagnostics": result.diagnostics,
+    }))
 }
 
 fn reconcile_on_start(store: &mut Store) {
