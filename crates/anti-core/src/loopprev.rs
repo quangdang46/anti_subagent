@@ -1,6 +1,6 @@
 //! Loop prevention (port veylen SubscriptionEvaluator.ts:308-423).
 //! Sliding window 1h, group theo [task_node_id, revision], trigger > 3,
-//! hysteresis reset khi count ≤ 1, cooldown 10 phút sau trigger.
+//! hysteresis reset when count ≤ 1, cooldown 10 minutes after trigger.
 
 use std::collections::HashMap;
 
@@ -12,7 +12,7 @@ pub const COOLDOWN_SECS: i64 = 600;
 pub struct LoopPrevention {
     /// key = (task_node_id, revision) → timestamps reject
     rejects: HashMap<(String, u32), Vec<i64>>,
-    /// key → thời điểm trigger escalation gần nhất (cooldown)
+    /// key → timestamp of last escalation trigger (cooldown)
     last_trigger: HashMap<(String, u32), i64>,
 }
 
@@ -36,8 +36,8 @@ impl LoopPrevention {
             .unwrap_or(0)
     }
 
-    /// Trigger khi count > threshold VÀ ngoài cooldown.
-    /// Hysteresis: nếu count giảm ≤ 1 (window trôi), cooldown hết → cho trigger lại.
+    /// Trigger when count > threshold AND outside cooldown.
+    /// Hysteresis: if count drops ≤ 1 (window slides), cooldown expires → allow re-trigger.
     pub fn should_escalate(&mut self, task_node_id: &str, revision: u32) -> bool {
         let key = (task_node_id.to_string(), revision);
         let count = self.count_in_window(task_node_id, revision);
@@ -81,7 +81,7 @@ mod tests {
             e.record_reject("task-1", 1, ts(60 - i * 10));
         }
         assert!(e.should_escalate("task-1", 1));
-        // peer sửa xong resubmit → revision 2 → group mới, counter sạch
+        // peer fixes and resubmits → revision 2 → new group, counter clean
         assert!(!e.should_escalate("task-1", 2));
     }
 

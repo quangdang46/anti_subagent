@@ -1,5 +1,5 @@
-//! Bounded capsule (irina project-state.ts:45) — mỗi agent chỉ thấy ≤64KB
-//! state view. Cắt theo phần quan trọng nhất, không bao giờ vượt budget.
+//! Bounded capsule (irina project-state.ts:45) — each agent sees ≤64KB
+//! state view. Truncates at most important parts, never exceeds budget.
 
 use crate::work::WorkItem;
 

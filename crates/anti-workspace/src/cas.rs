@@ -1,5 +1,5 @@
 //! CAS write (maestro fs.rs:120-141) — write-if-unchanged + lock marker.
-//! Chống last-writer-wins giữa 2 peers cùng sửa 1 file.
+//! Prevents last-writer-wins between 2 peers editing the same file.
 
 use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
@@ -24,12 +24,12 @@ pub fn sha256_of(path: &Path) -> std::io::Result<String> {
     Ok(format!("{:x}", Sha256::digest(&bytes)))
 }
 
-/// Baseline = sha256 của file tại thời điểm peer bắt đầu sửa.
+/// Baseline = sha256 of file when peer starts editing.
 pub fn read_baseline(path: &Path) -> std::io::Result<Baseline> {
     Ok(Baseline { sha256: sha256_of(path)? })
 }
 
-/// Ghi chỉ khi file vẫn còn đúng baseline. Ngược lại → CasError::Changed.
+/// Write only if file still matches baseline. Otherwise → CasError::Changed.
 pub fn write_if_unchanged(path: &Path, content: &str, base: &Baseline) -> Result<(), CasError> {
     if path.exists() {
         let now = sha256_of(path)?;
@@ -45,8 +45,8 @@ pub fn write_if_unchanged(path: &Path, content: &str, base: &Baseline) -> Result
     Ok(())
 }
 
-/// Lock marker: `.anti.lock` chứa holder. Atomic create_new — không bao giờ
-/// overwrite lock của peer khác.
+/// Lock marker: `.anti.lock` contains holder. Atomic create_new — never
+/// overwrites lock of another peer.
 pub fn acquire_lock(dir: &Path, holder: &str) -> Result<(), CasError> {
     let lock = dir.join(".anti.lock");
     match std::fs::OpenOptions::new().write(true).create_new(true).open(&lock) {

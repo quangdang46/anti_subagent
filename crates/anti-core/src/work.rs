@@ -1,13 +1,13 @@
-//! WorkItem — task lifecycle của SLP (SETTLED ≠ VERIFIED ≠ ACCEPTED).
+//! WorkItem — task lifecycle of SLP (SETTLED ≠ VERIFIED ≠ ACCEPTED).
 //!
-//! Bài học irina: "done" là claim, không phải sự thật; acceptance chỉ qua
+//! Lesson from irina: "done" is a claim, not truth; acceptance only through
 //! evidence + verification + decision.
-//! Bài học veylen: reject phải bump revision (group counter reset) và
-//! lead im lặng = phải có watchdog.
+//! Lesson from veylen: reject must bump revision (group counter reset) and
+//! silent lead = must have watchdog.
 
 use serde::{Deserialize, Serialize};
 
-/// Lifecycle states cho một work item — staged pipeline.
+/// Lifecycle states for a work item — staged pipeline.
 /// Path: RECEIVED → EXPLORED → PLANNED → EXECUTING → EXECUTED → VERIFYING → VERIFIED → ACCEPTED
 /// Failure paths: EXECUTING→FAILED, VERIFYING→REJECTED→FIXING→EXECUTING
 /// Terminal states: ACCEPTED, REJECTED, CANCELLED, EXHAUSTED
@@ -63,11 +63,11 @@ impl WorkItemState {
     }
 }
 
-/// Tham chiếu evidence — sha-256 hex của artifact (file/đầu ra).
-/// "claim phải khớp evidence thật"
+/// Evidence reference — sha-256 hex of artifact (file/output).
+/// "claim must match actual evidence"
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EvidenceRef {
-    /// sha-256 hex của artifact — claim phải khớp evidence thật
+    /// sha-256 hex of artifact — claim must match actual evidence
     pub sha256: String,
     pub artifact_path: String,
     pub produced_at: String,
@@ -148,7 +148,7 @@ impl EvidenceRecord {
     }
 }
 
-/// WorkItem — đơn vị công việc lead giao peer.
+/// WorkItem — unit of work assigned by lead to peer.
 /// Task lifecycle (SETTLED ≠ VERIFIED ≠ ACCEPTED).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkItem {
@@ -199,8 +199,8 @@ impl WorkItem {
         }
     }
 
-    /// Reject: chỉ được từ Submitted/Verified; bump revision;
-    /// quá max_revisions → Rejected terminal.
+    /// Reject: only from Submitted/Verified; bump revision;
+    /// exceeds max_revisions → Rejected terminal.
     pub fn reject(&mut self, lead_id: &str, verdict: &str) -> Result<(), WorkTransitionError> {
         if !matches!(
             self.state,
@@ -223,8 +223,8 @@ impl WorkItem {
         Ok(())
     }
 
-    /// Submit: gắn evidence + tính review_deadline (watchdog sẽ escalate nếu
-    /// lead im lặng — KHÔNG auto-accept, bài học veylen race AUTO-ACCEPT).
+    /// Submit: attach evidence + calculate review_deadline (watchdog will escalate if
+    /// lead is silent — NO auto-accept, lesson from veylen race AUTO-ACCEPT).
     pub fn submit(
         &mut self,
         evidence: EvidenceRef,
@@ -260,8 +260,8 @@ pub enum WorkTransitionError {
     },
 }
 
-/// Closed enum: lead decision sau khi review — exhaustive match đảm bảo
-/// mọi dispatch site xử lý đủ 3 trường hợp (maestro pattern).
+/// Closed enum: lead decision after review — exhaustive match ensures
+/// all dispatch sites handle all 3 cases (maestro pattern).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ReviewVerdict {
@@ -270,8 +270,8 @@ pub enum ReviewVerdict {
     Escalate, // lead im lặng quá deadline → supervisor (watchdog)
 }
 
-/// Closed enum: verification lifecycle — exhaustive match bắt buộc
-/// mọi code path xử lý đủ 6 trạng thái (maestro pattern).
+/// Closed enum: verification lifecycle — exhaustive match required
+/// for all code paths to handle all 6 states (maestro pattern).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum VerificationStatus {
@@ -363,7 +363,7 @@ impl VerificationResult {
     }
 }
 
-/// Bảng chuyển trạng thái — mọi thứ không liệt kê = bất hợp pháp.
+/// Transition table — anything not listed is illegal.
 pub fn can_transition(from: WorkItemState, to: WorkItemState) -> bool {
     use WorkItemState::*;
     if from == to {
@@ -471,7 +471,7 @@ mod tests {
 
     #[test]
     fn verification_status_is_exhaustively_matched() {
-        // Nếu thêm variant mới, match này phải fail compile — đó là mục đích
+        // If adding a new variant, this match must fail compile — that's the purpose
         fn describe(s: VerificationStatus) -> &'static str {
             match s {
                 VerificationStatus::Open => "no evidence yet",

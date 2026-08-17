@@ -262,8 +262,8 @@ fn main() {
             }
         }
     });
-    // Review watchdog: mỗi 15s, quét overdue reviews.
-    // Bài học veylen: lead im lặng = kẹt vô thời hạn. Escalate, không auto-accept.
+    // Review watchdog: scan overdue reviews every 15s.
+    // Lesson from veylen: silent lead = stuck indefinitely. Escalate, no auto-accept.
     let watchdog_store = store.clone();
     std::thread::spawn(move || loop {
         std::thread::sleep(Duration::from_secs(15));

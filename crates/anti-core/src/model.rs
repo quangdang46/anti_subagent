@@ -38,8 +38,8 @@ pub struct WorkspaceLease {
     pub lease_id: String,
     pub path: String,
     pub holder: String,
-    /// Generation fence (irina pattern): mỗi lần lease được cấp lại/đổi chủ,
-    /// generation tăng. Writer phải mang đúng generation hiện tại; stale → fence.
+    /// Generation fence (irina pattern): each time lease is reissued/transferred,
+    /// generation increments. Writer must carry current generation; stale → fence.
     pub generation: u64,
 }
 

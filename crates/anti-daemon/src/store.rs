@@ -439,7 +439,7 @@ impl Store {
         rows.next().transpose().map_err(StoreError::Sqlite)
     }
 
-    /// Optimistic-lock: chỉ cập nhật nếu state hiện tại khớp `expected`.
+    /// Optimistic-lock: only update if current state matches `expected`.
     pub fn update_work_state(
         &self,
         id: &str,
@@ -517,7 +517,7 @@ impl Store {
         rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::Sqlite)
     }
 
-    /// Lấy các work item quá review_deadline mà vẫn ở Submitted — watchdog dùng.
+    /// Get work items past review_deadline that are still Submitted — used by watchdog.
     pub fn overdue_reviews(&self, now: &str) -> Result<Vec<anti_core::work::WorkItem>, StoreError> {
         let mut stmt = self.conn.prepare(
             "SELECT id, task_node_id, peer_id, lead_id, state, revision, max_revisions,
