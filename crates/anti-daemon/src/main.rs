@@ -157,17 +157,11 @@ fn main() {
                 }
             }
             Request::StopAgent { id, force } => {
-                let mut cmd = std::process::Command::new("kill");
-                if force {
-                    cmd.arg("-9");
-                } else {
-                    cmd.arg("-TERM");
-                }
-                cmd.arg(&id);
-                // find the pid from the registry
+                // Get PID while lock is held
                 let pid = store.get_agent(&id).ok().flatten().and_then(|r| r.pid);
                 match pid {
                     Some(pid) => {
+                        // Kill process (brief external I/O — acceptable)
                         let st = std::process::Command::new("kill")
                             .args([if force { "-9" } else { "-TERM" }, &pid.to_string()])
                             .status();
