@@ -308,10 +308,7 @@ fn handle_submit_work(
     artifact_path: &str,
     review_timeout_secs: u64,
 ) -> Response {
-    let existing = store.get_work_item(id);
-    let is_new = matches!(&existing, Ok(None));
-
-    let mut w = match existing {
+    let mut w = match store.get_work_item(id) {
         Ok(Some(w)) => w,
         Ok(None) => {
             // Auto-create: Pending → InProgress
@@ -333,17 +330,9 @@ fn handle_submit_work(
         return Response::err("transition", e.to_string());
     }
 
-    // Save: INSERT for new items, UPDATE for existing
-    if is_new {
-        if let Err(e) = store.insert_work_item(&w) {
-            return Response::err("store", e.to_string());
-        }
-    } else {
-        let _ = store.update_work_state(id, anti_core::work::WorkItemState::InProgress, anti_core::work::WorkItemState::Submitted);
-        let _ = store.update_work_state(id, anti_core::work::WorkItemState::NeedsRevision, anti_core::work::WorkItemState::Submitted);
-        if let Err(e) = store.insert_work_item(&w) {
-            return Response::err("store", e.to_string());
-        }
+    // Save: INSERT OR REPLACE handles both new items and re-submits after reject
+    if let Err(e) = store.insert_work_item(&w) {
+        return Response::err("store", e.to_string());
     }
     let _ = store.append_event(
         id,

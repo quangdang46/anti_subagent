@@ -377,7 +377,7 @@ impl Store {
 
     pub fn insert_work_item(&self, w: &anti_core::work::WorkItem) -> Result<(), StoreError> {
         self.conn.execute(
-            "INSERT INTO work_items (id, task_node_id, peer_id, lead_id, state, revision,
+            "INSERT OR REPLACE INTO work_items (id, task_node_id, peer_id, lead_id, state, revision,
                  max_revisions, evidence_sha256, evidence_path, evidence_at,
                  review_verdict, submitted_at, review_deadline, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
