@@ -132,6 +132,7 @@ impl Store {
                             lease_id,
                             path: path.into(),
                             holder: String::new(),
+                            generation: 0,
                         }),
                         _ => None,
                     }
@@ -170,6 +171,7 @@ impl Store {
                             lease_id,
                             path: path.into(),
                             holder: String::new(),
+                            generation: 0,
                         }),
                         _ => None,
                     }

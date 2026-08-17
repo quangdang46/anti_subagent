@@ -38,6 +38,24 @@ pub struct WorkspaceLease {
     pub lease_id: String,
     pub path: String,
     pub holder: String,
+    /// Generation fence (irina pattern): mỗi lần lease được cấp lại/đổi chủ,
+    /// generation tăng. Writer phải mang đúng generation hiện tại; stale → fence.
+    pub generation: u64,
+}
+
+impl WorkspaceLease {
+    pub fn generation_matches(&self, expected: u64) -> bool {
+        self.generation == expected
+    }
+}
+
+/// Fence error — stale generation or wrong holder.
+#[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
+pub enum FenceError {
+    #[error("stale generation: expected {expected}, writer holds {actual}")]
+    StaleGeneration { expected: u64, actual: u64 },
+    #[error("lease not held by {holder}")]
+    NotHolder { holder: String },
 }
 
 /// Lifecycle states (plan §17). Transitions are enforced by optimistic-lock
@@ -97,5 +115,23 @@ mod tests {
         assert!(AgentStatus::Completed.is_terminal());
         assert!(AgentStatus::Failed.is_terminal());
         assert!(!AgentStatus::Running.is_terminal());
+    }
+
+    #[test]
+    fn stale_generation_is_fenced() {
+        let lease = WorkspaceLease {
+            lease_id: "L1".into(),
+            path: "/tmp/ws-1".into(),
+            holder: "peer-1".into(),
+            generation: 1,
+        };
+        assert!(lease.generation_matches(1));
+        assert!(!lease.generation_matches(2)); // stale — bị fence
+    }
+
+    #[test]
+    fn fence_error_carries_audit_info() {
+        let e = FenceError::StaleGeneration { expected: 2, actual: 1 };
+        assert!(e.to_string().contains("stale"));
     }
 }
