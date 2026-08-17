@@ -38,6 +38,11 @@ struct RunMetrics {
     crashes: u32,
     restarts: u32,
     events: u32,
+    // WorkItem lifecycle metrics (SLP arms C/D)
+    reviews: u32,
+    rejections: u32,
+    escalations: u32,
+    revisions: u32,
 }
 
 fn main() {
@@ -58,13 +63,17 @@ fn main() {
                 println!("  run {}: task {:?} ...", run + 1, task);
                 let m = run_arm(arm, &repo, task);
                 println!(
-                    "    → success={} tokens={}m/{}k wall={:.0}s crashes={} restarts={}",
+                    "    → success={} tokens={}m/{}k wall={:.0}s crashes={} restarts={} reviews={} rejections={} escalations={} rev={}",
                     m.task_success,
                     m.tokens_in / 1_000_000,
                     m.tokens_out / 1_000,
                     m.wall_secs,
                     m.crashes,
-                    m.restarts
+                    m.restarts,
+                    m.reviews,
+                    m.rejections,
+                    m.escalations,
+                    m.revisions
                 );
                 results.entry(arm).or_default().push(m);
             }
@@ -218,6 +227,15 @@ fn run_arm(arm: Arm, repo: &str, task: &str) -> RunMetrics {
                     match t {
                         "AGENT_CRASHED" => m.crashes += 1,
                         "AGENT_RESTARTED" => m.restarts += 1,
+                        "WORK_SUBMITTED" => m.reviews += 1,
+                        "WORK_REJECTED" => {
+                            m.rejections += 1;
+                            // Extract revision bump from payload
+                            if let Some(rev) = e.get("payload").and_then(|p| p.get("revision")).and_then(|r| r.as_u64()) {
+                                m.revisions = rev as u32;
+                            }
+                        }
+                        "REVIEW_ESCALATED" => m.escalations += 1,
                         _ => {}
                     }
                 }
