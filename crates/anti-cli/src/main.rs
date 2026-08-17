@@ -7,7 +7,11 @@ use std::path::PathBuf;
 mod commands;
 
 #[derive(Parser)]
-#[command(name = "anti", version, about = "Deploy peers, not subagents. SLP orchestration for coding agents.")]
+#[command(
+    name = "anti",
+    version,
+    about = "Deploy peers, not subagents. SLP orchestration for coding agents."
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -86,6 +90,24 @@ enum Commands {
     },
     /// Show recent review escalations (watchdog events)
     Escalations,
+    /// Report task status back to the daemon (peer → anti channel)
+    Report {
+        /// Task/work item ID
+        #[arg(long)]
+        task: String,
+        /// Status: completed, failed, progress, question
+        #[arg(long)]
+        status: String,
+        /// Git commit SHA (for completed status)
+        #[arg(long)]
+        commit: Option<String>,
+        /// Error message (for failed status)
+        #[arg(long)]
+        error: Option<String>,
+        /// Progress/question message text
+        #[arg(long)]
+        message: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -144,13 +166,11 @@ enum DaemonAction {
 
 fn main() {
     let cli = Cli::parse();
-    let state_dir = cli
-        .state_dir
-        .unwrap_or_else(|| {
-            std::env::var("HOME")
-                .map(|h| PathBuf::from(h).join(".anti_subagent"))
-                .unwrap_or_else(|_| PathBuf::from("."))
-        });
+    let state_dir = cli.state_dir.unwrap_or_else(|| {
+        std::env::var("HOME")
+            .map(|h| PathBuf::from(h).join(".anti_subagent"))
+            .unwrap_or_else(|_| PathBuf::from("."))
+    });
 
     let result = match cli.command {
         Commands::Spawn {
@@ -161,8 +181,19 @@ fn main() {
             task,
             repo,
             parent,
-        } => commands::spawn(&state_dir, &id, &role, disposition.as_deref(), &harness, task.as_deref(), &repo, parent.as_deref()),
-        Commands::List { role, status, json } => commands::list(&state_dir, role.as_deref(), status.as_deref(), json),
+        } => commands::spawn(
+            &state_dir,
+            &id,
+            &role,
+            disposition.as_deref(),
+            &harness,
+            task.as_deref(),
+            &repo,
+            parent.as_deref(),
+        ),
+        Commands::List { role, status, json } => {
+            commands::list(&state_dir, role.as_deref(), status.as_deref(), json)
+        }
         Commands::Status { id } => commands::status(&state_dir, &id),
         Commands::Wait { id, until, timeout } => commands::wait(&state_dir, &id, &until, timeout),
         Commands::Stop { id } => commands::stop(&state_dir, &id, false),
@@ -173,6 +204,20 @@ fn main() {
         Commands::Doctor => commands::doctor(&state_dir),
         Commands::Work { action } => commands::work(&state_dir, action),
         Commands::Escalations => commands::escalations(&state_dir),
+        Commands::Report {
+            task,
+            status,
+            commit,
+            error,
+            message,
+        } => commands::report(
+            &state_dir,
+            &task,
+            &status,
+            commit.as_deref(),
+            error.as_deref(),
+            message.as_deref(),
+        ),
     };
 
     match result {

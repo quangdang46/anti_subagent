@@ -68,8 +68,9 @@ pub fn list(
         .into_iter()
         .filter(|a| {
             let ok_role = role.map_or(true, |r| a.get("role").and_then(|x| x.as_str()) == Some(r));
-            let ok_status = status
-                .map_or(true, |s| a.get("status").and_then(|x| x.as_str()) == Some(s));
+            let ok_status = status.map_or(true, |s| {
+                a.get("status").and_then(|x| x.as_str()) == Some(s)
+            });
             ok_role && ok_status
         })
         .collect();
@@ -97,7 +98,10 @@ pub fn status(state_dir: &PathBuf, id: &str) -> Result<String, String> {
     if !daemon_running(state_dir) {
         return Err("daemon not running — start it first with `anti daemon start`".into());
     }
-    let resp = ipc::send_request(&socket(state_dir), &Request::GetAgent { id: id.to_string() })?;
+    let resp = ipc::send_request(
+        &socket(state_dir),
+        &Request::GetAgent { id: id.to_string() },
+    )?;
     check(resp)
 }
 
@@ -216,8 +220,20 @@ pub fn guard(state_dir: &PathBuf, action: crate::GuardAction) -> Result<String, 
                 .flat_map(|c| c.to_lowercase())
                 .collect();
             let stems = [
-                "agent", "subagent", "task", "workflow", "cron", "schedul", "worktree",
-                "delegate", "spawn", "dispatch", "handoff", "remote", "sendmessage", "monitor",
+                "agent",
+                "subagent",
+                "task",
+                "workflow",
+                "cron",
+                "schedul",
+                "worktree",
+                "delegate",
+                "spawn",
+                "dispatch",
+                "handoff",
+                "remote",
+                "sendmessage",
+                "monitor",
             ];
             let matched = stems.iter().find(|s| normalized.contains(**s));
             Ok(match matched {
@@ -243,9 +259,7 @@ pub fn guard(state_dir: &PathBuf, action: crate::GuardAction) -> Result<String, 
             };
             let mut v: serde_json::Value =
                 serde_json::from_str(&existing).map_err(|e| format!("invalid hooks.json: {e}"))?;
-            let hooks = v
-                .as_object_mut()
-                .ok_or("hooks.json must be an object")?;
+            let hooks = v.as_object_mut().ok_or("hooks.json must be an object")?;
             hooks.insert(
                 "PreToolUse".to_string(),
                 serde_json::json!([
@@ -260,8 +274,11 @@ pub fn guard(state_dir: &PathBuf, action: crate::GuardAction) -> Result<String, 
                     }
                 ]),
             );
-            std::fs::write(&hooks_path, serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?)
-                .map_err(|e| e.to_string())?;
+            std::fs::write(
+                &hooks_path,
+                serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())?;
             Ok(format!("guard installed at {}", hooks_path.display()))
         }
         crate::GuardAction::Status => {
@@ -269,7 +286,10 @@ pub fn guard(state_dir: &PathBuf, action: crate::GuardAction) -> Result<String, 
             if sock.exists() && daemon_running(state_dir) {
                 Ok("guard: daemon up — fail-closed active (delegation tools denied)".to_string())
             } else {
-                Ok("guard: daemon DOWN — guard fails closed (delegation tools denied locally)".to_string())
+                Ok(
+                    "guard: daemon DOWN — guard fails closed (delegation tools denied locally)"
+                        .to_string(),
+                )
             }
         }
     }
@@ -307,7 +327,10 @@ pub fn doctor(state_dir: &PathBuf) -> Result<String, String> {
 
     let db = state_dir.join("state.db");
     lines.push(if db.exists() {
-        format!("state.db: present ({} bytes)", std::fs::metadata(&db).map(|m| m.len()).unwrap_or(0))
+        format!(
+            "state.db: present ({} bytes)",
+            std::fs::metadata(&db).map(|m| m.len()).unwrap_or(0)
+        )
     } else {
         "state.db: missing (start daemon once to create)".to_string()
     });
@@ -320,7 +343,12 @@ pub fn work(state_dir: &PathBuf, action: crate::WorkAction) -> Result<String, St
         return Err("daemon not running — start it first with `anti daemon start`".into());
     }
     match action {
-        crate::WorkAction::Submit { id, sha, path, timeout } => {
+        crate::WorkAction::Submit {
+            id,
+            sha,
+            path,
+            timeout,
+        } => {
             let resp = ipc::send_request(
                 &socket(state_dir),
                 &Request::SubmitWork {
@@ -355,12 +383,39 @@ pub fn work(state_dir: &PathBuf, action: crate::WorkAction) -> Result<String, St
                 let state = item.get("state").and_then(|x| x.as_str()).unwrap_or("");
                 let rev = item.get("revision").and_then(|x| x.as_i64()).unwrap_or(0);
                 let peer = item.get("peer_id").and_then(|x| x.as_str()).unwrap_or("");
-                let deadline = item.get("review_deadline").and_then(|x| x.as_str()).unwrap_or("-");
+                let deadline = item
+                    .get("review_deadline")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("-");
                 out.push_str(&format!("\n{id}\t{state}\t{rev}\t{peer}\t{deadline}"));
             }
             Ok(out)
         }
     }
+}
+
+pub fn report(
+    state_dir: &PathBuf,
+    task_id: &str,
+    status: &str,
+    commit: Option<&str>,
+    error: Option<&str>,
+    message: Option<&str>,
+) -> Result<String, String> {
+    if !daemon_running(state_dir) {
+        return Err("daemon not running — start it first with `anti daemon start`".into());
+    }
+    let resp = ipc::send_request(
+        &socket(state_dir),
+        &Request::ReportTask {
+            task_id: task_id.to_string(),
+            status: status.to_string(),
+            commit: commit.map(str::to_string),
+            error: error.map(str::to_string),
+            message: message.map(str::to_string),
+        },
+    )?;
+    check(resp)
 }
 
 pub fn escalations(state_dir: &PathBuf) -> Result<String, String> {
@@ -394,9 +449,14 @@ pub fn escalations(state_dir: &PathBuf) -> Result<String, String> {
     for item in &overdue {
         let id = item.get("id").and_then(|x| x.as_str()).unwrap_or("");
         let peer = item.get("peer_id").and_then(|x| x.as_str()).unwrap_or("");
-        let deadline = item.get("review_deadline").and_then(|x| x.as_str()).unwrap_or("");
+        let deadline = item
+            .get("review_deadline")
+            .and_then(|x| x.as_str())
+            .unwrap_or("");
         let rev = item.get("revision").and_then(|x| x.as_i64()).unwrap_or(0);
-        out.push_str(&format!("\n  {id} peer={peer} rev={rev} deadline={deadline}"));
+        out.push_str(&format!(
+            "\n  {id} peer={peer} rev={rev} deadline={deadline}"
+        ));
     }
     Ok(out)
 }
