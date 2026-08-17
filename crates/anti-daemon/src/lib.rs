@@ -3,6 +3,7 @@
 //! not an executor: peers are independent OS processes.
 
 pub mod bus;
+pub mod handoff;
 pub mod ipc;
 pub mod scheduler;
 pub mod store;
