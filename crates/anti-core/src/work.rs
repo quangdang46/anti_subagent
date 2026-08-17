@@ -24,16 +24,16 @@ pub enum WorkItemState {
     Rejected,      // terminal reject (vượt max_revisions hoặc lead hủy)
 
     // Staged pipeline states (Phase 1)
-    Received,      // task assigned to peer
-    Explored,      // peer has investigated codebase
-    Planned,       // implementation plan created
-    Executing,     // peer actively coding
-    Executed,      // code written, awaiting verification
-    Verifying,     // verification in progress
-    Failed,        // execution failed (terminal)
-    Fixing,        // peer fixing issues after rejection
-    Exhausted,     // max_revisions exceeded (terminal)
-    Cancelled,     // task cancelled (terminal)
+    Received,  // task assigned to peer
+    Explored,  // peer has investigated codebase
+    Planned,   // implementation plan created
+    Executing, // peer actively coding
+    Executed,  // code written, awaiting verification
+    Verifying, // verification in progress
+    Failed,    // execution failed (terminal)
+    Fixing,    // peer fixing issues after rejection
+    Exhausted, // max_revisions exceeded (terminal)
+    Cancelled, // task cancelled (terminal)
 }
 
 impl WorkItemState {
@@ -377,10 +377,12 @@ pub fn can_transition(from: WorkItemState, to: WorkItemState) -> bool {
             | (InProgress, Rejected)
             | (Submitted, Verified)
             | (Submitted, NeedsRevision)
+            | (Submitted, Failed) // exhausted: max_revisions exceeded
             | (Verified, Accepted)
             | (Verified, NeedsRevision)
             | (NeedsRevision, InProgress)
             | (NeedsRevision, Rejected)
+            | (NeedsRevision, Failed) // exhausted: max_revisions exceeded
         // Staged pipeline transitions
             | (Received, Explored)
             | (Explored, Planned)

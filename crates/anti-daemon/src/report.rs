@@ -466,4 +466,212 @@ mod tests {
         assert!(resp.message.contains("which DB?"));
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// Helper: create a temp git repo with one empty commit, return (repo_path, commit_sha).
+    fn create_test_git_repo(prefix: &str) -> (std::path::PathBuf, String) {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .subsec_nanos();
+        let repo = std::env::temp_dir().join(format!("{prefix}-{}-{nanos}", std::process::id(),));
+        std::fs::create_dir_all(&repo).unwrap();
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        // Create a file so there's something to commit
+        std::fs::write(repo.join("dummy.txt"), "hello").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        let sha = String::from_utf8(
+            std::process::Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&repo)
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+        (repo, sha)
+    }
+
+    #[test]
+    fn completed_with_valid_commit_transitions_to_submitted() {
+        let (workspace, sha) = create_test_git_repo("report-valid");
+        let state_dir = std::env::temp_dir().join(format!(
+            "anti-report-test-validcommit-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&state_dir);
+        let mut store = Store::open(&state_dir).unwrap();
+
+        // Register agent with workspace
+        let agent = anti_core::model::AgentRecord {
+            id: "peer-1".into(),
+            role: anti_core::model::Role::Peer,
+            disposition: Some(anti_core::model::Disposition::Engineer),
+            harness: anti_core::model::Harness::Claude,
+            parent_id: Some("lead-1".into()),
+            pid: Some(99999),
+            workspace: Some(anti_core::model::WorkspaceLease {
+                lease_id: "lease-1".into(),
+                path: workspace.to_string_lossy().to_string(),
+                holder: "peer-1".into(),
+                generation: 1,
+            }),
+            task_path: None,
+            status: anti_core::model::AgentStatus::Running,
+            restart_count: 0,
+            spawn_gen: 1,
+            last_state_change_seq: 0,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+        };
+        store.insert_agent(&agent).unwrap();
+
+        // Insert work item assigned to peer-1
+        let mut w = anti_core::work::WorkItem::new("w1".into(), "peer-1".into());
+        w.transition(WorkItemState::InProgress).unwrap();
+        store.insert_work_item(&w).unwrap();
+
+        let result = handle_report(&mut store, "w1", "completed", Some(&sha), None, None);
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+        let resp = result.unwrap();
+        assert_eq!(resp.new_state, WorkItemState::Submitted);
+        assert!(resp.message.contains("verified"));
+
+        // Verify work item was updated
+        let updated = store.get_work_item("w1").unwrap().unwrap();
+        assert_eq!(updated.state, WorkItemState::Submitted);
+        assert!(updated.evidence.is_some());
+        assert!(updated.submitted_at.is_some());
+
+        let _ = std::fs::remove_dir_all(&state_dir);
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn completed_with_nonexistent_commit_fails() {
+        let (workspace, _sha) = create_test_git_repo("report-nocommit");
+        let state_dir =
+            std::env::temp_dir().join(format!("anti-report-test-badcommit-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&state_dir);
+        let mut store = Store::open(&state_dir).unwrap();
+
+        let agent = anti_core::model::AgentRecord {
+            id: "peer-1".into(),
+            role: anti_core::model::Role::Peer,
+            disposition: Some(anti_core::model::Disposition::Engineer),
+            harness: anti_core::model::Harness::Claude,
+            parent_id: Some("lead-1".into()),
+            pid: Some(99999),
+            workspace: Some(anti_core::model::WorkspaceLease {
+                lease_id: "lease-1".into(),
+                path: workspace.to_string_lossy().to_string(),
+                holder: "peer-1".into(),
+                generation: 1,
+            }),
+            task_path: None,
+            status: anti_core::model::AgentStatus::Running,
+            restart_count: 0,
+            spawn_gen: 1,
+            last_state_change_seq: 0,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+        };
+        store.insert_agent(&agent).unwrap();
+
+        let mut w = anti_core::work::WorkItem::new("w1".into(), "peer-1".into());
+        w.transition(WorkItemState::InProgress).unwrap();
+        store.insert_work_item(&w).unwrap();
+
+        let result = handle_report(
+            &mut store,
+            "w1",
+            "completed",
+            Some("deadbeefdeadbeef"),
+            None,
+            None,
+        );
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            ReportError::CommitNotFound(sha) => assert_eq!(sha, "deadbeefdeadbeef"),
+            other => panic!("expected CommitNotFound, got {other:?}"),
+        }
+
+        let _ = std::fs::remove_dir_all(&state_dir);
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn failed_status_transitions_to_needs_revision() {
+        let state_dir =
+            std::env::temp_dir().join(format!("anti-report-test-failed-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&state_dir);
+        let mut store = Store::open(&state_dir).unwrap();
+
+        // Work item must be in Submitted state (valid source for NeedsRevision)
+        let mut w = anti_core::work::WorkItem::new("w1".into(), "peer-1".into());
+        w.transition(WorkItemState::InProgress).unwrap();
+        w.transition(WorkItemState::Submitted).unwrap();
+        store.insert_work_item(&w).unwrap();
+
+        let result = handle_report(
+            &mut store,
+            "w1",
+            "failed",
+            None,
+            Some("compile error"),
+            None,
+        );
+        assert!(result.is_ok());
+        let resp = result.unwrap();
+        assert_eq!(resp.new_state, WorkItemState::NeedsRevision);
+
+        let _ = std::fs::remove_dir_all(&state_dir);
+    }
+
+    #[test]
+    fn failed_when_exhausted_transitions_to_failed() {
+        let state_dir =
+            std::env::temp_dir().join(format!("anti-report-test-exhausted-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&state_dir);
+        let mut store = Store::open(&state_dir).unwrap();
+
+        // Work item at max revisions, in Submitted state
+        let mut w = anti_core::work::WorkItem::new("w1".into(), "peer-1".into());
+        w.revision = 3; // at max_revisions
+        w.max_revisions = 3;
+        w.transition(WorkItemState::InProgress).unwrap();
+        w.transition(WorkItemState::Submitted).unwrap();
+        store.insert_work_item(&w).unwrap();
+
+        let result = handle_report(&mut store, "w1", "failed", None, Some("still broken"), None);
+        assert!(result.is_ok());
+        let resp = result.unwrap();
+        assert_eq!(resp.new_state, WorkItemState::Failed);
+
+        let _ = std::fs::remove_dir_all(&state_dir);
+    }
 }
