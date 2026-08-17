@@ -313,3 +313,89 @@ pub fn doctor(state_dir: &PathBuf) -> Result<String, String> {
 
     Ok(lines.join("\n"))
 }
+
+pub fn work(state_dir: &PathBuf, action: crate::WorkAction) -> Result<String, String> {
+    if !daemon_running(state_dir) {
+        return Err("daemon not running — start it first with `anti daemon start`".into());
+    }
+    match action {
+        crate::WorkAction::Submit { id, sha, path, timeout } => {
+            let resp = ipc::send_request(
+                &socket(state_dir),
+                &Request::SubmitWork {
+                    id,
+                    sha256: sha,
+                    artifact_path: path,
+                    review_timeout_secs: timeout,
+                },
+            )?;
+            check(resp)
+        }
+        crate::WorkAction::Review { id, verdict, note } => {
+            let resp = ipc::send_request(
+                &socket(state_dir),
+                &Request::ReviewWork { id, verdict, note },
+            )?;
+            check(resp)
+        }
+        crate::WorkAction::List => {
+            let resp = ipc::send_request(&socket(state_dir), &Request::ListWorkItems)?;
+            let v = match resp {
+                Response::Ok(v) => v,
+                Response::Err { code, message } => return Err(format!("{code}: {message}")),
+            };
+            let items = v.as_array().cloned().unwrap_or_default();
+            if items.is_empty() {
+                return Ok("No work items.".into());
+            }
+            let mut out = String::from("ID\tSTATE\tREV\tPEER\tDEADLINE");
+            for item in &items {
+                let id = item.get("id").and_then(|x| x.as_str()).unwrap_or("");
+                let state = item.get("state").and_then(|x| x.as_str()).unwrap_or("");
+                let rev = item.get("revision").and_then(|x| x.as_i64()).unwrap_or(0);
+                let peer = item.get("peer_id").and_then(|x| x.as_str()).unwrap_or("");
+                let deadline = item.get("review_deadline").and_then(|x| x.as_str()).unwrap_or("-");
+                out.push_str(&format!("\n{id}\t{state}\t{rev}\t{peer}\t{deadline}"));
+            }
+            Ok(out)
+        }
+    }
+}
+
+pub fn escalations(state_dir: &PathBuf) -> Result<String, String> {
+    if !daemon_running(state_dir) {
+        return Err("daemon not running — start it first with `anti daemon start`".into());
+    }
+    // List all work items to find any with recent ReviewEscalated events.
+    // For the MVP, we list Submitted items past their deadline.
+    let resp = ipc::send_request(&socket(state_dir), &Request::ListWorkItems)?;
+    let v = match resp {
+        Response::Ok(v) => v,
+        Response::Err { code, message } => return Err(format!("{code}: {message}")),
+    };
+    let items = v.as_array().cloned().unwrap_or_default();
+    let now = chrono::Utc::now().to_rfc3339();
+    let overdue: Vec<_> = items
+        .iter()
+        .filter(|item| {
+            item.get("state").and_then(|x| x.as_str()) == Some("Submitted")
+                && item
+                    .get("review_deadline")
+                    .and_then(|x| x.as_str())
+                    .map(|d| d < now.as_str())
+                    .unwrap_or(false)
+        })
+        .collect();
+    if overdue.is_empty() {
+        return Ok("No overdue reviews (no escalations).".into());
+    }
+    let mut out = String::from("OVERDUE REVIEWS (escalation candidates):");
+    for item in &overdue {
+        let id = item.get("id").and_then(|x| x.as_str()).unwrap_or("");
+        let peer = item.get("peer_id").and_then(|x| x.as_str()).unwrap_or("");
+        let deadline = item.get("review_deadline").and_then(|x| x.as_str()).unwrap_or("");
+        let rev = item.get("revision").and_then(|x| x.as_i64()).unwrap_or(0);
+        out.push_str(&format!("\n  {id} peer={peer} rev={rev} deadline={deadline}"));
+    }
+    Ok(out)
+}

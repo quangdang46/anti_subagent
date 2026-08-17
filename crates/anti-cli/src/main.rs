@@ -79,6 +79,43 @@ enum Commands {
     },
     /// Check daemon, state dir, treehouse, claude
     Doctor,
+    /// Manage work items (SLP task lifecycle)
+    Work {
+        #[command(subcommand)]
+        action: WorkAction,
+    },
+    /// Show recent review escalations (watchdog events)
+    Escalations,
+}
+
+#[derive(Subcommand)]
+enum WorkAction {
+    /// Submit work item with evidence (InProgress|NeedsRevision → Submitted)
+    Submit {
+        /// Work item id
+        id: String,
+        /// SHA-256 of the artifact
+        #[arg(long)]
+        sha: String,
+        /// Path to the artifact file
+        #[arg(long)]
+        path: String,
+        /// Review timeout in seconds (default 600)
+        #[arg(long, default_value_t = 600)]
+        timeout: u64,
+    },
+    /// Review a work item (accept requires Verified state; reject bumps revision)
+    Review {
+        /// Work item id
+        id: String,
+        /// Verdict: accept | reject
+        verdict: String,
+        /// Review note
+        #[arg(long, default_value = "")]
+        note: String,
+    },
+    /// List all work items
+    List,
 }
 
 #[derive(Subcommand)]
@@ -134,6 +171,8 @@ fn main() {
         Commands::Daemon { action } => commands::daemon(&state_dir, action),
         Commands::Guard { action } => commands::guard(&state_dir, action),
         Commands::Doctor => commands::doctor(&state_dir),
+        Commands::Work { action } => commands::work(&state_dir, action),
+        Commands::Escalations => commands::escalations(&state_dir),
     };
 
     match result {
