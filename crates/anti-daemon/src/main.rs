@@ -774,7 +774,8 @@ fn handle_review_work(
 fn handle_verify_work(store: &mut Store, id: &str, profile_str: &str) -> Response {
     use anti_core::work::{VerifyProfile, VerificationResult, VerifyStatus};
 
-    let mut w = match store.get_work_item(id) {
+    // Phase 1: Validate (with lock)
+    let w = match store.get_work_item(id) {
         Ok(Some(w)) => w,
         Ok(None) => return Response::err("not_found", format!("work item {id} not found")),
         Err(e) => return Response::err("store", e.to_string()),
@@ -795,10 +796,10 @@ fn handle_verify_work(store: &mut Store, id: &str, profile_str: &str) -> Respons
         _ => return Response::err("invalid", format!("unknown profile '{profile_str}' — use full/check/test/build/named:<name>")),
     };
 
+    // Phase 2: Run cargo commands (NO lock held)
     let mut result = VerificationResult::new(profile.clone());
     let mut all_pass = true;
 
-    // Run each command in the profile
     for cmd in profile.commands() {
         let parts: Vec<&str> = cmd.split_whitespace().collect();
         if parts.is_empty() {
@@ -838,7 +839,6 @@ fn handle_verify_work(store: &mut Store, id: &str, profile_str: &str) -> Respons
         }
     }
 
-    // Capture git state
     if let Ok(out) = std::process::Command::new("git").args(["rev-parse", "HEAD"]).output() {
         result.git_sha = Some(String::from_utf8_lossy(&out.stdout).trim().to_string());
     }
@@ -850,19 +850,17 @@ fn handle_verify_work(store: &mut Store, id: &str, profile_str: &str) -> Respons
     }
 
     result.status = if all_pass { VerifyStatus::Pass } else { VerifyStatus::Fail };
-
-    // Transition state based on verification result
     let new_state = if all_pass {
         anti_core::work::WorkItemState::Verified
     } else {
-        // Stay at Submitted on failure — peer must fix and resubmit
         anti_core::work::WorkItemState::Submitted
     };
 
+    // Phase 3: Commit results (with lock)
+    let mut w = w;
     if let Err(e) = w.transition(new_state) {
         return Response::err("transition", e.to_string());
     }
-
     let _ = store.insert_work_item(&w);
     let _ = store.append_event(id, EventType::WorkVerified, json!({
         "status": format!("{:?}", result.status),
