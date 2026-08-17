@@ -124,10 +124,14 @@ pub fn send_request(socket: &Path, req: &Request) -> Result<Response, String> {
 pub fn send_request(addr: &Path, req: &Request) -> Result<Response, String> {
     use std::io::{BufRead, BufReader, Write};
     use std::net::TcpStream;
+    use std::time::Duration;
 
     let addr_str = addr.to_str().ok_or("address not valid UTF-8")?;
     let stream = TcpStream::connect(addr_str)
         .map_err(|e| format!("cannot connect to daemon at {addr_str}: {e}"))?;
+    // Set read/write timeouts to prevent hanging
+    stream.set_read_timeout(Some(Duration::from_secs(10))).map_err(|e| e.to_string())?;
+    stream.set_write_timeout(Some(Duration::from_secs(10))).map_err(|e| e.to_string())?;
     let mut writer = &stream;
     let line = serde_json::to_string(req).map_err(|e| e.to_string())?;
     writer.write_all(line.as_bytes()).map_err(|e| e.to_string())?;
@@ -207,6 +211,7 @@ where
 {
     use std::io::{BufRead, BufReader, Write};
     use std::net::TcpListener;
+    use std::time::Duration;
 
     let addr_str = addr.to_str().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::InvalidInput, "address not valid UTF-8")
@@ -216,7 +221,7 @@ where
     let listener = match TcpListener::bind(addr_str) {
         Ok(l) => l,
         Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
-            std::thread::sleep(std::time::Duration::from_millis(200));
+            std::thread::sleep(Duration::from_millis(200));
             TcpListener::bind(addr_str)?
         }
         Err(e) => return Err(e),
@@ -235,11 +240,14 @@ where
         let (mut stream, _) = match listener.accept() {
             Ok(s) => s,
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                std::thread::sleep(std::time::Duration::from_millis(100));
+                std::thread::sleep(Duration::from_millis(100));
                 continue;
             }
             Err(_) => continue,
         };
+        // Set read/write timeouts to prevent stuck threads
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+        let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
         let handle = handle.clone();
         let shutdown = shutdown.clone();
         std::thread::spawn(move || {
