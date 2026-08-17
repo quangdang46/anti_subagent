@@ -1,3 +1,27 @@
 /target
 .tmp
 hello.txt
+
+# Embedded research repos (shallow clones, not part of the project)
+agent-skills/
+firstmate/
+maestro/
+maestro-orchestrate/
+opencode-solo/
+pi-subagents/
+senior-fable/
+slb/
+herdr/
+opengoat/
+treehouse/
+paseo/
+veylen/
+irina/
+discord-digests/
+agent-orchestrator/
+
+# Runtime artifacts
+state.db
+anti.sock
+*.lock
+anti-guard.sh
