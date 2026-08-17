@@ -1,4 +1,6 @@
-use anti_adapters::{ClaudeCodeAdapter, CodexAdapter, HarnessAdapter, OpenCodeAdapter, SpawnContext};
+use anti_adapters::{
+    ClaudeCodeAdapter, CodexAdapter, HarnessAdapter, OpenCodeAdapter, SpawnContext,
+};
 use anti_core::events::EventType;
 use anti_core::model::{AgentRecord, AgentStatus, Harness, Role};
 use anti_daemon::ipc::{self, Request, Response};
@@ -100,7 +102,10 @@ fn main() {
     // Track live children so a peer's exit becomes AGENT_COMPLETED/CRASHED.
     let children: HashMap<String, Child> = HashMap::new();
 
-    let handle = |store: &mut Store, children: &mut HashMap<String, Child>, req: Request| -> Response {
+    let handle = |store: &mut Store,
+                  children: &mut HashMap<String, Child>,
+                  req: Request|
+     -> Response {
         match req {
             Request::Shutdown => Response::ok(json!({"shutdown": true})),
             Request::Ping => Response::ok(json!({"pong": true})),
@@ -114,7 +119,9 @@ fn main() {
                     || tool.contains("delegate");
 
                 if is_delegation {
-                    Response::ok(json!({"tool": tool, "allowed": false, "reason": "delegation-shaped tool denied"}))
+                    Response::ok(
+                        json!({"tool": tool, "allowed": false, "reason": "delegation-shaped tool denied"}),
+                    )
                 } else {
                     Response::ok(json!({"tool": tool, "allowed": true}))
                 }
@@ -128,7 +135,18 @@ fn main() {
                 repo,
                 parent_id,
                 prompt,
-            } => spawn(store, children, &id, &role, disposition.as_deref(), &harness, task_path.as_deref(), &repo, parent_id.as_deref(), prompt.as_deref()),
+            } => spawn(
+                store,
+                children,
+                &id,
+                &role,
+                disposition.as_deref(),
+                &harness,
+                task_path.as_deref(),
+                &repo,
+                parent_id.as_deref(),
+                prompt.as_deref(),
+            ),
             Request::ListAgents => match store.list_agents() {
                 Ok(agents) => Response::ok(agents),
                 Err(e) => Response::err("store", e.to_string()),
@@ -152,7 +170,9 @@ fn main() {
                     timeout,
                     Duration::from_millis(100),
                 ) {
-                    Ok(status) => Response::ok(json!({"id": id, "status": format!("{:?}", status)})),
+                    Ok(status) => {
+                        Response::ok(json!({"id": id, "status": format!("{:?}", status)}))
+                    }
                     Err(e) => Response::err("wait", e),
                 }
             }
@@ -168,43 +188,57 @@ fn main() {
                         match st {
                             Ok(s) if s.success() => {
                                 let _ = store.update_status(&id, AgentStatus::Stopped);
-                                let _ = store.append_event(&id, EventType::AgentStopped, json!({"force": force}));
+                                let _ = store.append_event(
+                                    &id,
+                                    EventType::AgentStopped,
+                                    json!({"force": force}),
+                                );
                                 Response::ok(json!({"id": id, "status": "stopped"}))
                             }
-                            Ok(_) => Response::err("stop", format!("kill returned failure for {id}")),
+                            Ok(_) => {
+                                Response::err("stop", format!("kill returned failure for {id}"))
+                            }
                             Err(e) => Response::err("stop", e.to_string()),
                         }
                     }
                     None => Response::err("not_found", format!("no pid for {id}")),
                 }
             }
-            Request::RestartAgent { id } => {
-                match restart_agent(store, children, &id) {
-                    Ok(pid) => Response::ok(json!({"id": id, "status": "restarting", "pid": pid})),
-                    Err(e) => Response::err("restart", e),
-                }
-            }
-            Request::SubmitWork { id, sha256, artifact_path, review_timeout_secs } => {
-                handle_submit_work(store, &id, &sha256, &artifact_path, review_timeout_secs)
-            }
+            Request::RestartAgent { id } => match restart_agent(store, children, &id) {
+                Ok(pid) => Response::ok(json!({"id": id, "status": "restarting", "pid": pid})),
+                Err(e) => Response::err("restart", e),
+            },
+            Request::SubmitWork {
+                id,
+                sha256,
+                artifact_path,
+                review_timeout_secs,
+            } => handle_submit_work(store, &id, &sha256, &artifact_path, review_timeout_secs),
             Request::ReviewWork { id, verdict, note } => {
                 handle_review_work(store, &id, &verdict, &note)
             }
-            Request::VerifyWork { id, profile } => {
-                handle_verify_work(store, &id, &profile)
-            }
+            Request::VerifyWork { id, profile } => handle_verify_work(store, &id, &profile),
             Request::CheckDisposition { disposition, tool } => {
                 handle_check_disposition(&disposition, &tool)
             }
-            Request::ReportTask { task_id, status, commit, error, message } => {
-                handle_report_task(store, &task_id, &status, commit.as_deref(), error.as_deref(), message.as_deref())
-            }
-            Request::ListWorkItems => {
-                match store.list_work_items(None) {
-                    Ok(items) => Response::ok(items),
-                    Err(e) => Response::err("store", e.to_string()),
-                }
-            }
+            Request::ReportTask {
+                task_id,
+                status,
+                commit,
+                error,
+                message,
+            } => handle_report_task(
+                store,
+                &task_id,
+                &status,
+                commit.as_deref(),
+                error.as_deref(),
+                message.as_deref(),
+            ),
+            Request::ListWorkItems => match store.list_work_items(None) {
+                Ok(items) => Response::ok(items),
+                Err(e) => Response::err("store", e.to_string()),
+            },
         }
     };
 
@@ -220,10 +254,12 @@ fn main() {
     let children = std::sync::Arc::new(std::sync::Mutex::new(children));
     // Reaper uses try_lock so it can never block or deadlock the IPC loop.
     let (rs, rc) = (store.clone(), children.clone());
-    std::thread::spawn(move || loop {
-        std::thread::sleep(Duration::from_secs(5));
-        if let (Ok(mut s), Ok(mut c)) = (rs.try_lock(), rc.try_lock()) {
-            reap_children(&mut s, &mut c);
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(Duration::from_secs(5));
+            if let (Ok(mut s), Ok(mut c)) = (rs.try_lock(), rc.try_lock()) {
+                reap_children(&mut s, &mut c);
+            }
         }
     });
     // Lease sweeper: releases treehouse leases of agents that reached a
@@ -231,31 +267,33 @@ fn main() {
     // block), so it never stalls IPC. Treehouse acquire skips leased
     // worktrees, but without this the pool fills up over many runs.
     let sweeper_store = store.clone();
-    std::thread::spawn(move || loop {
-        std::thread::sleep(Duration::from_secs(15));
-        let terminal: Vec<(String, String, String)> = {
-            let s = match sweeper_store.lock() {
-                Ok(g) => g,
-                Err(_) => continue,
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(Duration::from_secs(15));
+            let terminal: Vec<(String, String, String)> = {
+                let s = match sweeper_store.lock() {
+                    Ok(g) => g,
+                    Err(_) => continue,
+                };
+                s.list_agents()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|a| a.status.is_terminal())
+                    .filter_map(|a| {
+                        a.workspace
+                            .map(|w| (a.id.clone(), w.lease_id.clone(), w.path.clone()))
+                    })
+                    .collect()
             };
-            s.list_agents()
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|a| a.status.is_terminal())
-                .filter_map(|a| {
-                    a.workspace
-                        .map(|w| (a.id.clone(), w.lease_id.clone(), w.path.clone()))
-                })
-                .collect()
-        };
-        for (id, lease_id, path) in terminal {
-            let _ = Treehouse::new(resolve_treehouse()).release_if_lease(
-                &lease_id,
-                std::path::Path::new(&path),
-                std::path::Path::new(&path),
-            );
-            if let Ok(s) = sweeper_store.lock() {
-                let _ = s.clear_workspace(&id);
+            for (id, lease_id, path) in terminal {
+                let _ = Treehouse::new(resolve_treehouse()).release_if_lease(
+                    &lease_id,
+                    std::path::Path::new(&path),
+                    std::path::Path::new(&path),
+                );
+                if let Ok(s) = sweeper_store.lock() {
+                    let _ = s.clear_workspace(&id);
+                }
             }
         }
     });
@@ -263,34 +301,36 @@ fn main() {
     // Lesson from veylen: silent lead = stuck indefinitely. Escalate, no auto-accept.
     // INVARIANT: No external/blocking operation while holding store Mutex.
     let watchdog_store = store.clone();
-    std::thread::spawn(move || loop {
-        std::thread::sleep(Duration::from_secs(15));
-        // Phase 1: Read overdue reviews (lock, read, unlock)
-        let overdue: Vec<_> = {
-            let s = match watchdog_store.lock() {
-                Ok(g) => g,
-                Err(_) => continue,
-            };
-            let now = chrono::Utc::now().to_rfc3339();
-            match s.overdue_reviews(&now) {
-                Ok(v) => v,
-                Err(_) => continue,
-            }
-        }; // lock released here
-        // Phase 2: Emit events (lock per event, brief)
-        for w in overdue {
-            if let Ok(mut s) = watchdog_store.lock() {
-                let _ = s.append_event(
-                    &w.id,
-                    EventType::ReviewEscalated,
-                    json!({
-                        "peer_id": w.peer_id,
-                        "lead_id": w.lead_id,
-                        "revision": w.revision,
-                        "deadline": w.review_deadline,
-                        "action": "supervisor intervention required",
-                    }),
-                );
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(Duration::from_secs(15));
+            // Phase 1: Read overdue reviews (lock, read, unlock)
+            let overdue: Vec<_> = {
+                let s = match watchdog_store.lock() {
+                    Ok(g) => g,
+                    Err(_) => continue,
+                };
+                let now = chrono::Utc::now().to_rfc3339();
+                match s.overdue_reviews(&now) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                }
+            }; // lock released here
+            // Phase 2: Emit events (lock per event, brief)
+            for w in overdue {
+                if let Ok(mut s) = watchdog_store.lock() {
+                    let _ = s.append_event(
+                        &w.id,
+                        EventType::ReviewEscalated,
+                        json!({
+                            "peer_id": w.peer_id,
+                            "lead_id": w.lead_id,
+                            "revision": w.revision,
+                            "deadline": w.review_deadline,
+                            "action": "supervisor intervention required",
+                        }),
+                    );
+                }
             }
         }
     });
@@ -333,7 +373,10 @@ fn main() {
                     continue;
                 }
                 if std::time::Instant::now() >= deadline {
-                    return Response::err("wait", format!("timeout after {timeout:?} waiting for {id}"));
+                    return Response::err(
+                        "wait",
+                        format!("timeout after {timeout:?} waiting for {id}"),
+                    );
                 }
                 std::thread::sleep(Duration::from_millis(100));
             }
@@ -424,7 +467,11 @@ fn spawn_peer(
         if let Err(e) = s.insert_agent(&rec) {
             return Response::err("duplicate", format!("cannot reserve id {id}: {e}"));
         }
-        let _ = s.append_event(id, EventType::AgentRegistered, json!({"role": role, "harness": harness}));
+        let _ = s.append_event(
+            id,
+            EventType::AgentRegistered,
+            json!({"role": role, "harness": harness}),
+        );
         if let Err(e) = s.update_status(id, AgentStatus::Starting) {
             return Response::err("store", format!("{e}"));
         }
@@ -438,7 +485,11 @@ fn spawn_peer(
             // Re-acquire lock to mark failure
             if let Ok(mut s) = store.lock() {
                 let _ = s.update_status(id, AgentStatus::Failed);
-                let _ = s.append_event(id, EventType::AgentFailed, json!({"error": format!("workspace: {e}")}));
+                let _ = s.append_event(
+                    id,
+                    EventType::AgentFailed,
+                    json!({"error": format!("workspace: {e}")}),
+                );
             }
             return Response::err("workspace", e.to_string());
         }
@@ -450,8 +501,14 @@ fn spawn_peer(
         .unwrap_or_else(|_| PathBuf::from("/tmp/anti_logs"));
     std::fs::create_dir_all(&log_path).ok();
     let log_file = log_path.join(format!("{id}.log"));
-    let _ = std::fs::OpenOptions::new().create(true).truncate(true).write(true).open(&log_file);
-    let peer_prompt = prompt.unwrap_or("You are a peer working on this repository with the project owner. Work independently.");
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&log_file);
+    let peer_prompt = prompt.unwrap_or(
+        "You are a peer working on this repository with the project owner. Work independently.",
+    );
     let ctx = SpawnContext {
         worktree: worktree.path.clone(),
         task: task_path.map(str::to_string),
@@ -468,13 +525,26 @@ fn spawn_peer(
             if let Ok(mut s) = store.lock() {
                 let _ = s.update_status(id, AgentStatus::Failed);
             }
-            let _ = treehouse.release_if_lease(&worktree.lease_id, &worktree.path, std::path::Path::new(repo));
+            let _ = treehouse.release_if_lease(
+                &worktree.lease_id,
+                &worktree.path,
+                std::path::Path::new(repo),
+            );
             return Response::err("spawn", e.to_string());
         }
     };
     cmd.stdout(std::process::Stdio::from(
-        std::fs::OpenOptions::new().create(true).append(true).open(&log_file)
-            .unwrap_or_else(|_| std::fs::OpenOptions::new().create(true).append(true).open("/dev/null").unwrap()),
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_file)
+            .unwrap_or_else(|_| {
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open("/dev/null")
+                    .unwrap()
+            }),
     ));
 
     let child_result = cmd.spawn();
@@ -502,8 +572,13 @@ fn spawn_peer(
                 let pid = child.id();
                 let _ = s.attach_pid(id, pid);
                 let _ = s.update_status(id, AgentStatus::Running);
-                let _ = s.set_workspace(id, &worktree.lease_id, &worktree.path.display().to_string());
-                let _ = s.append_event(id, EventType::AgentStarted, json!({"pid": pid, "worktree": worktree.path.display().to_string()}));
+                let _ =
+                    s.set_workspace(id, &worktree.lease_id, &worktree.path.display().to_string());
+                let _ = s.append_event(
+                    id,
+                    EventType::AgentStarted,
+                    json!({"pid": pid, "worktree": worktree.path.display().to_string()}),
+                );
                 c.insert(id.to_string(), child);
                 Response::ok(json!({
                     "id": id,
@@ -515,7 +590,11 @@ fn spawn_peer(
             Err(e) => {
                 let _ = s.update_status(id, AgentStatus::Failed);
                 let _ = s.append_event(id, EventType::AgentFailed, json!({"error": e.to_string()}));
-                let _ = treehouse.release_if_lease(&worktree.lease_id, &worktree.path, std::path::Path::new(repo));
+                let _ = treehouse.release_if_lease(
+                    &worktree.lease_id,
+                    &worktree.path,
+                    std::path::Path::new(repo),
+                );
                 Response::err("spawn", format!("{e}"))
             }
         }
@@ -643,7 +722,13 @@ fn spawn_peer_impl(
             .create(true)
             .append(true)
             .open(&log_file)
-            .unwrap_or_else(|_| std::fs::OpenOptions::new().create(true).append(true).open("/dev/null").unwrap()),
+            .unwrap_or_else(|_| {
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open("/dev/null")
+                    .unwrap()
+            }),
     ));
     match cmd.spawn() {
         Ok(mut child) => {
@@ -673,11 +758,7 @@ fn spawn_peer_impl(
         }
         Err(e) => {
             let _ = store.update_status(id, AgentStatus::Failed);
-            let _ = store.append_event(
-                id,
-                EventType::AgentFailed,
-                json!({"error": e.to_string()}),
-            );
+            let _ = store.append_event(id, EventType::AgentFailed, json!({"error": e.to_string()}));
             let _ = Treehouse::new(resolve_treehouse()).release_if_lease(
                 &worktree.lease_id,
                 &worktree.path,
@@ -733,12 +814,7 @@ fn handle_submit_work(
     Response::ok(json!({"id": id, "state": "Submitted", "review_deadline": w.review_deadline}))
 }
 
-fn handle_review_work(
-    store: &mut Store,
-    id: &str,
-    verdict: &str,
-    note: &str,
-) -> Response {
+fn handle_review_work(store: &mut Store, id: &str, verdict: &str, note: &str) -> Response {
     let mut w = match store.get_work_item(id) {
         Ok(Some(w)) => w,
         Ok(None) => return Response::err("not_found", format!("work item {id} not found")),
@@ -747,7 +823,10 @@ fn handle_review_work(
     match verdict {
         "accept" => {
             if w.state != anti_core::work::WorkItemState::Verified {
-                return Response::err("precondition", "accept requires Verified state — run verify first");
+                return Response::err(
+                    "precondition",
+                    "accept requires Verified state — run verify first",
+                );
             }
             if let Err(e) = w.transition(anti_core::work::WorkItemState::Accepted) {
                 return Response::err("transition", e.to_string());
@@ -761,18 +840,27 @@ fn handle_review_work(
                 return Response::err("transition", e.to_string());
             }
             let _ = store.insert_work_item(&w);
-            let _ = store.append_event(id, EventType::WorkRejected, json!({
-                "note": note,
-                "revision": w.revision,
-            }));
-            Response::ok(json!({"id": id, "state": format!("{:?}", w.state), "revision": w.revision}))
+            let _ = store.append_event(
+                id,
+                EventType::WorkRejected,
+                json!({
+                    "note": note,
+                    "revision": w.revision,
+                }),
+            );
+            Response::ok(
+                json!({"id": id, "state": format!("{:?}", w.state), "revision": w.revision}),
+            )
         }
-        other => Response::err("invalid", format!("unknown verdict '{other}' — use 'accept' or 'reject'")),
+        other => Response::err(
+            "invalid",
+            format!("unknown verdict '{other}' — use 'accept' or 'reject'"),
+        ),
     }
 }
 
 fn handle_verify_work(store: &mut Store, id: &str, profile_str: &str) -> Response {
-    use anti_core::work::{VerifyProfile, VerificationResult, VerifyStatus};
+    use anti_core::work::{VerificationResult, VerifyProfile, VerifyStatus};
 
     // Phase 1: Validate (with lock)
     let w = match store.get_work_item(id) {
@@ -793,7 +881,12 @@ fn handle_verify_work(store: &mut Store, id: &str, profile_str: &str) -> Respons
         other if other.starts_with("named:") => {
             VerifyProfile::Named(other.strip_prefix("named:").unwrap_or("").to_string())
         }
-        _ => return Response::err("invalid", format!("unknown profile '{profile_str}' — use full/check/test/build/named:<name>")),
+        _ => {
+            return Response::err(
+                "invalid",
+                format!("unknown profile '{profile_str}' — use full/check/test/build/named:<name>"),
+            );
+        }
     };
 
     // Phase 2: Run cargo commands (NO lock held)
@@ -808,9 +901,7 @@ fn handle_verify_work(store: &mut Store, id: &str, profile_str: &str) -> Respons
         let program = parts[0];
         let args = &parts[1..];
 
-        let output = std::process::Command::new(program)
-            .args(args)
-            .output();
+        let output = std::process::Command::new(program).args(args).output();
 
         match output {
             Ok(out) => {
@@ -829,27 +920,41 @@ fn handle_verify_work(store: &mut Store, id: &str, profile_str: &str) -> Respons
 
                 if !out.status.success() {
                     all_pass = false;
-                    result.diagnostics.push(format!("[{cmd}] exit {code}: {stderr}"));
+                    result
+                        .diagnostics
+                        .push(format!("[{cmd}] exit {code}: {stderr}"));
                 }
             }
             Err(e) => {
                 all_pass = false;
-                result.diagnostics.push(format!("[{cmd}] failed to execute: {e}"));
+                result
+                    .diagnostics
+                    .push(format!("[{cmd}] failed to execute: {e}"));
             }
         }
     }
 
-    if let Ok(out) = std::process::Command::new("git").args(["rev-parse", "HEAD"]).output() {
+    if let Ok(out) = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .output()
+    {
         result.git_sha = Some(String::from_utf8_lossy(&out.stdout).trim().to_string());
     }
-    if let Ok(out) = std::process::Command::new("git").args(["diff", "--stat"]).output() {
+    if let Ok(out) = std::process::Command::new("git")
+        .args(["diff", "--stat"])
+        .output()
+    {
         let diff = String::from_utf8_lossy(&out.stdout).to_string();
         if !diff.trim().is_empty() {
             result.git_diff = Some(diff);
         }
     }
 
-    result.status = if all_pass { VerifyStatus::Pass } else { VerifyStatus::Fail };
+    result.status = if all_pass {
+        VerifyStatus::Pass
+    } else {
+        VerifyStatus::Fail
+    };
     let new_state = if all_pass {
         anti_core::work::WorkItemState::Verified
     } else {
@@ -862,11 +967,15 @@ fn handle_verify_work(store: &mut Store, id: &str, profile_str: &str) -> Respons
         return Response::err("transition", e.to_string());
     }
     let _ = store.insert_work_item(&w);
-    let _ = store.append_event(id, EventType::WorkVerified, json!({
-        "status": format!("{:?}", result.status),
-        "profile": format!("{:?}", result.profile),
-        "diagnostics_count": result.diagnostics.len(),
-    }));
+    let _ = store.append_event(
+        id,
+        EventType::WorkVerified,
+        json!({
+            "status": format!("{:?}", result.status),
+            "profile": format!("{:?}", result.profile),
+            "diagnostics_count": result.diagnostics.len(),
+        }),
+    );
 
     Response::ok(json!({
         "id": id,
@@ -878,7 +987,7 @@ fn handle_verify_work(store: &mut Store, id: &str, profile_str: &str) -> Respons
 }
 
 fn handle_check_disposition(disposition_str: &str, tool: &str) -> Response {
-    use anti_core::disposition::{contract_for, DispositionError};
+    use anti_core::disposition::{DispositionError, contract_for};
     use anti_core::model::Disposition;
 
     let disposition = match disposition_str {
@@ -888,7 +997,12 @@ fn handle_check_disposition(disposition_str: &str, tool: &str) -> Response {
         "scout" => Disposition::Scout,
         "proof_auditor" | "proofauditor" => Disposition::ProofAuditor,
         "shadow" => Disposition::Shadow,
-        _ => return Response::err("invalid", format!("unknown disposition '{disposition_str}'")),
+        _ => {
+            return Response::err(
+                "invalid",
+                format!("unknown disposition '{disposition_str}'"),
+            );
+        }
     };
 
     let contract = contract_for(disposition);
@@ -908,24 +1022,22 @@ fn handle_check_disposition(disposition_str: &str, tool: &str) -> Response {
     }
 }
 
-/// Stub handler for ReportTask — to be implemented in report.rs (bead yib).
-/// Returns a placeholder response for now.
+/// Handle ReportTask from a peer. Delegates to report::handle_report.
 fn handle_report_task(
-    _store: &mut Store,
+    store: &mut Store,
     task_id: &str,
     status: &str,
-    _commit: Option<&str>,
-    _error: Option<&str>,
-    _message: Option<&str>,
+    commit: Option<&str>,
+    error: Option<&str>,
+    message: Option<&str>,
 ) -> Response {
-    use anti_core::report::ReportStatus;
-    match ReportStatus::from_str(status) {
-        Ok(s) => Response::ok(json!({
-            "task_id": task_id,
-            "status": format!("{:?}", s),
-            "note": "report handler stub — full implementation pending"
+    match anti_daemon::report::handle_report(store, task_id, status, commit, error, message) {
+        Ok(resp) => Response::ok(json!({
+            "task_id": resp.task_id,
+            "new_state": format!("{:?}", resp.new_state),
+            "message": resp.message,
         })),
-        Err(e) => Response::err("invalid_status", e.to_string()),
+        Err(e) => Response::err("report_error", e.to_string()),
     }
 }
 
@@ -939,7 +1051,10 @@ fn reconcile_on_start(store: &mut Store) {
         agents
             .into_iter()
             .filter(|rec| {
-                matches!(rec.status, AgentStatus::Running | AgentStatus::Blocked | AgentStatus::Starting)
+                matches!(
+                    rec.status,
+                    AgentStatus::Running | AgentStatus::Blocked | AgentStatus::Starting
+                )
             })
             .filter(|rec| {
                 rec.pid
@@ -995,7 +1110,10 @@ fn reconcile_on_start(store: &mut Store) {
             },
         });
         let _ = store.append_event(&rec.id, EventType::PeerCrashed, payload);
-        eprintln!("[RECOVERY] Cleaned up dead agent {} (pid {:?})", rec.id, rec.pid);
+        eprintln!(
+            "[RECOVERY] Cleaned up dead agent {} (pid {:?})",
+            rec.id, rec.pid
+        );
     }
 }
 
@@ -1012,21 +1130,21 @@ fn reap_children(store: &mut Store, children: &mut HashMap<String, Child>) -> Ve
     let dead: Vec<(String, bool, Option<i32>)> = children
         .iter_mut()
         .filter_map(|(id, child)| {
-            child
-                .try_wait()
-                .ok()
-                .flatten()
-                .map(|status| {
-                    let code = status.code();
-                    let ok = code.unwrap_or(1) <= 2;
-                    (id.clone(), ok, code)
-                })
+            child.try_wait().ok().flatten().map(|status| {
+                let code = status.code();
+                let ok = code.unwrap_or(1) <= 2;
+                (id.clone(), ok, code)
+            })
         })
         .collect();
     let mut cleanups = Vec::new();
     for (id, ok, exit_code) in dead {
         children.remove(&id);
-        let workspace_lease = store.get_agent(&id).ok().flatten().and_then(|a| a.workspace);
+        let workspace_lease = store
+            .get_agent(&id)
+            .ok()
+            .flatten()
+            .and_then(|a| a.workspace);
         let _ = store.mark_exit(&id, ok);
 
         if !ok {
@@ -1086,7 +1204,11 @@ fn restart_agent(
     }
 
     let _ = store.begin_recovery(id);
-    let _ = store.append_event(id, EventType::AgentRestarted, json!({"restart_count": rec.restart_count + 1}));
+    let _ = store.append_event(
+        id,
+        EventType::AgentRestarted,
+        json!({"restart_count": rec.restart_count + 1}),
+    );
 
     // Backoff: 1s * 2^restart_count (cap 30s) so a crash-loop doesn't spin.
     let backoff = std::time::Duration::from_secs((1u64 << rec.restart_count.min(5)).min(30));
@@ -1132,14 +1254,24 @@ fn restart_agent(
             .create(true)
             .append(true)
             .open(&log_file)
-            .unwrap_or_else(|_| std::fs::OpenOptions::new().create(true).append(true).open("/dev/null").unwrap()),
+            .unwrap_or_else(|_| {
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open("/dev/null")
+                    .unwrap()
+            }),
     ));
     cmd.stderr(std::process::Stdio::inherit());
     let child = cmd.spawn().map_err(|e| e.to_string())?;
     let pid = child.id();
     let _ = store.inc_restart(id);
     let _ = store.set_running(id, pid);
-    let _ = store.append_event(id, EventType::AgentStarted, json!({"pid": pid, "restart": true}));
+    let _ = store.append_event(
+        id,
+        EventType::AgentStarted,
+        json!({"pid": pid, "restart": true}),
+    );
     children.insert(id.to_string(), child);
     Ok(pid)
 }
@@ -1267,7 +1399,13 @@ fn spawn(
             .create(true)
             .append(true)
             .open(&log_file)
-            .unwrap_or_else(|_| std::fs::OpenOptions::new().create(true).append(true).open("/dev/null").unwrap()),
+            .unwrap_or_else(|_| {
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open("/dev/null")
+                    .unwrap()
+            }),
     ));
     match cmd.spawn() {
         Ok(mut child) => {
@@ -1297,11 +1435,7 @@ fn spawn(
         }
         Err(e) => {
             let _ = store.update_status(id, AgentStatus::Failed);
-            let _ = store.append_event(
-                id,
-                EventType::AgentFailed,
-                json!({"error": e.to_string()}),
-            );
+            let _ = store.append_event(id, EventType::AgentFailed, json!({"error": e.to_string()}));
             let _ = Treehouse::new(resolve_treehouse()).release_if_lease(
                 &worktree.lease_id,
                 &worktree.path,
