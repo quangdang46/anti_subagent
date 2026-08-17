@@ -73,6 +73,81 @@ pub struct EvidenceRef {
     pub produced_at: String,
 }
 
+/// Comprehensive evidence record for audit trail.
+/// Replaces simple EvidenceRef with full verification evidence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvidenceRecord {
+    // Integrity
+    pub artifact_sha256: String,
+    pub artifact_path: String,
+
+    // Verification evidence
+    pub test_output: Option<String>,
+    pub test_exit_code: Option<i32>,
+    pub build_output: Option<String>,
+    pub build_exit_code: Option<i32>,
+    pub lint_output: Option<String>,
+    pub diagnostics: Vec<String>,
+
+    // Git state at verification time
+    pub git_sha: Option<String>,
+    pub git_diff: Option<String>,
+    pub git_status: Option<String>,
+
+    // Acceptance criteria verification
+    pub claims: Vec<ClaimVerification>,
+
+    // Metadata
+    pub produced_at: String,
+    pub verified_at: Option<String>,
+    pub verified_by: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClaimVerification {
+    pub claim: String,
+    pub status: VerifyClaimStatus,
+    pub evidence: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VerifyClaimStatus {
+    Verified,
+    Partial,
+    Missing,
+}
+
+impl EvidenceRecord {
+    pub fn new(artifact_sha256: String, artifact_path: String) -> Self {
+        Self {
+            artifact_sha256,
+            artifact_path,
+            test_output: None,
+            test_exit_code: None,
+            build_output: None,
+            build_exit_code: None,
+            lint_output: None,
+            diagnostics: Vec::new(),
+            git_sha: None,
+            git_diff: None,
+            git_status: None,
+            claims: Vec::new(),
+            produced_at: chrono::Utc::now().to_rfc3339(),
+            verified_at: None,
+            verified_by: None,
+        }
+    }
+
+    /// Convert to legacy EvidenceRef for backward compatibility
+    pub fn to_evidence_ref(&self) -> EvidenceRef {
+        EvidenceRef {
+            sha256: self.artifact_sha256.clone(),
+            artifact_path: self.artifact_path.clone(),
+            produced_at: self.produced_at.clone(),
+        }
+    }
+}
+
 /// WorkItem — đơn vị công việc lead giao peer.
 /// Task lifecycle (SETTLED ≠ VERIFIED ≠ ACCEPTED).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -268,20 +343,6 @@ pub enum VerifyStatus {
     Pass,
     Fail,
     Incomplete,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ClaimVerification {
-    pub claim: String,
-    pub status: VerifyClaimStatus,
-    pub evidence: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum VerifyClaimStatus {
-    Verified,
-    Partial,
-    Missing,
 }
 
 impl VerificationResult {
