@@ -208,6 +208,7 @@ pub fn daemon(state_dir: &PathBuf, action: crate::DaemonAction) -> Result<String
 pub fn guard(state_dir: &PathBuf, action: crate::GuardAction) -> Result<String, String> {
     match action {
         crate::GuardAction::Test { tool } => {
+            // Local classification — no daemon needed (mirrors the guard script's stem scan).
             // Local classification (mirrors the guard script's stem scan).
             let normalized: String = tool
                 .chars()
