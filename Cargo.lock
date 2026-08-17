@@ -130,6 +130,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "anti-integration"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "anti-workspace"
 version = "0.1.0"
 dependencies = [
