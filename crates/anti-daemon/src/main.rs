@@ -591,15 +591,55 @@ fn reconcile_on_start(store: &mut Store) {
         let alive = rec
             .pid
             .map(|pid| {
-                std::process::Command::new("kill")
-                    .args(["-0", &pid.to_string()])
-                    .status()
-                    .map(|s| s.success())
-                    .unwrap_or(false)
+                #[cfg(unix)]
+                {
+                    std::process::Command::new("kill")
+                        .args(["-0", &pid.to_string()])
+                        .status()
+                        .map(|s| s.success())
+                        .unwrap_or(false)
+                }
+                #[cfg(windows)]
+                {
+                    // On Windows, check if process exists using tasklist
+                    std::process::Command::new("tasklist")
+                        .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+                        .output()
+                        .map(|o| {
+                            let stdout = String::from_utf8_lossy(&o.stdout);
+                            stdout.contains(&pid.to_string())
+                        })
+                        .unwrap_or(false)
+                }
             })
             .unwrap_or(false);
         if !alive {
+            // Dead process — mark as crashed and cleanup workspace
             let _ = store.mark_exit(&rec.id, false);
+
+            // Cleanup workspace via Treehouse if agent had a lease
+            if let Some(workspace) = &rec.workspace {
+                let treehouse = Treehouse::new(resolve_treehouse());
+                let _ = treehouse.release_if_lease(
+                    &workspace.lease_id,
+                    std::path::Path::new(&workspace.path),
+                    std::path::Path::new("."),
+                );
+            }
+
+            // Emit structured crash event with evidence
+            let payload = json!({
+                "exit_code": null,
+                "workspace_lease_id": rec.workspace.as_ref().map(|w| &w.lease_id),
+                "workspace_path": rec.workspace.as_ref().map(|w| &w.path),
+                "crash_evidence": {
+                    "timestamp": chrono::Utc::now().to_rfc3339(),
+                    "reason": "daemon_restart_dead_process",
+                },
+            });
+            let _ = store.append_event(&rec.id, EventType::PeerCrashed, payload);
+
+            eprintln!("[RECOVERY] Cleaned up dead agent {} (pid {:?})", rec.id, rec.pid);
         }
     }
 }
