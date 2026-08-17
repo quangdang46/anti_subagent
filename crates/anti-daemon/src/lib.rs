@@ -4,5 +4,6 @@
 
 pub mod bus;
 pub mod ipc;
+pub mod scheduler;
 pub mod store;
 pub mod wait;
