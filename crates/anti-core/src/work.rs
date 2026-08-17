@@ -149,6 +149,29 @@ pub enum WorkTransitionError {
     },
 }
 
+/// Closed enum: lead decision sau khi review — exhaustive match đảm bảo
+/// mọi dispatch site xử lý đủ 3 trường hợp (maestro pattern).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ReviewVerdict {
+    Accept,
+    Reject,
+    Escalate, // lead im lặng quá deadline → supervisor (watchdog)
+}
+
+/// Closed enum: verification lifecycle — exhaustive match bắt buộc
+/// mọi code path xử lý đủ 6 trạng thái (maestro pattern).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum VerificationStatus {
+    Open,
+    EvidenceReady,
+    Verifying,
+    Verified,
+    Failed,
+    Uncertain,
+}
+
 /// Bảng chuyển trạng thái — mọi thứ không liệt kê = bất hợp pháp.
 pub fn can_transition(from: WorkItemState, to: WorkItemState) -> bool {
     use WorkItemState::*;
@@ -220,5 +243,28 @@ mod tests {
         assert!(WorkItemState::Accepted.is_terminal());
         assert!(WorkItemState::Rejected.is_terminal());
         assert!(!WorkItemState::Submitted.is_terminal());
+    }
+
+    #[test]
+    fn verdict_roundtrip() {
+        let v = ReviewVerdict::Accept;
+        let s = serde_json::to_string(&v).unwrap();
+        assert_eq!(serde_json::from_str::<ReviewVerdict>(&s).unwrap(), v);
+    }
+
+    #[test]
+    fn verification_status_is_exhaustively_matched() {
+        // Nếu thêm variant mới, match này phải fail compile — đó là mục đích
+        fn describe(s: VerificationStatus) -> &'static str {
+            match s {
+                VerificationStatus::Open => "no evidence yet",
+                VerificationStatus::EvidenceReady => "claim filed",
+                VerificationStatus::Verifying => "checking sha",
+                VerificationStatus::Verified => "matches artifact",
+                VerificationStatus::Failed => "mismatch",
+                VerificationStatus::Uncertain => "needs human",
+            }
+        }
+        assert_eq!(describe(VerificationStatus::Verified), "matches artifact");
     }
 }
