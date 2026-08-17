@@ -24,6 +24,11 @@ pub enum EventType {
     HandoffCreated,
     AgentPromptStalled,
     AgentRejected,
+    WorkSubmitted,
+    WorkVerified,
+    WorkAccepted,
+    WorkRejected,
+    ReviewEscalated,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -36,6 +36,18 @@ pub enum Request {
     WaitAgent { id: String, until: String, timeout_secs: u64 },
     StopAgent { id: String, force: bool },
     RestartAgent { id: String },
+    SubmitWork {
+        id: String,
+        sha256: String,
+        artifact_path: String,
+        review_timeout_secs: u64,
+    },
+    ReviewWork {
+        id: String,
+        verdict: String, // "accept" | "reject"
+        note: String,
+    },
+    ListWorkItems,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

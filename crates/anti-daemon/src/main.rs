@@ -143,6 +143,18 @@ fn main() {
                     Err(e) => Response::err("restart", e),
                 }
             }
+            Request::SubmitWork { id, sha256, artifact_path, review_timeout_secs } => {
+                handle_submit_work(store, &id, &sha256, &artifact_path, review_timeout_secs)
+            }
+            Request::ReviewWork { id, verdict, note } => {
+                handle_review_work(store, &id, &verdict, &note)
+            }
+            Request::ListWorkItems => {
+                match store.list_work_items(None) {
+                    Ok(items) => Response::ok(items),
+                    Err(e) => Response::err("store", e.to_string()),
+                }
+            }
         }
     };
 
@@ -257,6 +269,85 @@ fn main() {
 }
 
 /// Mark agents whose process died while the daemon was down (plan §23).
+fn handle_submit_work(
+    store: &mut Store,
+    id: &str,
+    sha256: &str,
+    artifact_path: &str,
+    review_timeout_secs: u64,
+) -> Response {
+    let mut w = match store.get_work_item(id) {
+        Ok(Some(w)) => w,
+        Ok(None) => return Response::err("not_found", format!("work item {id} not found")),
+        Err(e) => return Response::err("store", e.to_string()),
+    };
+    let evidence = anti_core::work::EvidenceRef {
+        sha256: sha256.to_string(),
+        artifact_path: artifact_path.to_string(),
+        produced_at: chrono::Utc::now().to_rfc3339(),
+    };
+    if let Err(e) = w.submit(evidence, review_timeout_secs) {
+        return Response::err("transition", e.to_string());
+    }
+    if let Err(e) = store.update_work_state(id, anti_core::work::WorkItemState::InProgress, anti_core::work::WorkItemState::Submitted) {
+        // Also allow NeedsRevision → Submitted
+        if let Err(e2) = store.update_work_state(id, anti_core::work::WorkItemState::NeedsRevision, anti_core::work::WorkItemState::Submitted) {
+            return Response::err("transition", format!("{e}; {e2}"));
+        }
+    }
+    if let Err(e) = store.insert_work_item(&w) {
+        return Response::err("store", e.to_string());
+    }
+    let _ = store.append_event(
+        id,
+        EventType::WorkSubmitted,
+        json!({
+            "sha256": sha256,
+            "artifact_path": artifact_path,
+            "review_deadline": w.review_deadline,
+        }),
+    );
+    Response::ok(json!({"id": id, "state": "Submitted", "review_deadline": w.review_deadline}))
+}
+
+fn handle_review_work(
+    store: &mut Store,
+    id: &str,
+    verdict: &str,
+    note: &str,
+) -> Response {
+    let mut w = match store.get_work_item(id) {
+        Ok(Some(w)) => w,
+        Ok(None) => return Response::err("not_found", format!("work item {id} not found")),
+        Err(e) => return Response::err("store", e.to_string()),
+    };
+    match verdict {
+        "accept" => {
+            if w.state != anti_core::work::WorkItemState::Verified {
+                return Response::err("precondition", "accept requires Verified state — run verify first");
+            }
+            if let Err(e) = w.transition(anti_core::work::WorkItemState::Accepted) {
+                return Response::err("transition", e.to_string());
+            }
+            let _ = store.insert_work_item(&w);
+            let _ = store.append_event(id, EventType::WorkAccepted, json!({"note": note}));
+            Response::ok(json!({"id": id, "state": "Accepted"}))
+        }
+        "reject" => {
+            if let Err(e) = w.reject("lead", note) {
+                return Response::err("transition", e.to_string());
+            }
+            let _ = store.insert_work_item(&w);
+            let _ = store.append_event(id, EventType::WorkRejected, json!({
+                "note": note,
+                "revision": w.revision,
+            }));
+            Response::ok(json!({"id": id, "state": format!("{:?}", w.state), "revision": w.revision}))
+        }
+        other => Response::err("invalid", format!("unknown verdict '{other}' — use 'accept' or 'reject'")),
+    }
+}
+
 fn reconcile_on_start(store: &mut Store) {
     let agents = match store.list_agents() {
         Ok(a) => a,
