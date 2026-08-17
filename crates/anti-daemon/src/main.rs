@@ -364,7 +364,330 @@ fn main() {
     std::process::exit(0);
 }
 
-/// Mark agents whose process died while the daemon was down (plan §23).
+/// Spawn a peer agent — phases split to avoid holding store lock during external I/O.
+/// Phase 1: validate + reserve (with lock)
+/// Phase 2: Treehouse + subprocess (no lock)
+/// Phase 3: commit results (with lock)
+fn spawn_peer(
+    store: &std::sync::Mutex<Store>,
+    children: &std::sync::Mutex<HashMap<String, Child>>,
+    id: &str,
+    role: &str,
+    disposition: Option<&str>,
+    harness: &str,
+    task_path: Option<&str>,
+    repo: &str,
+    parent_id: Option<&str>,
+    prompt: Option<&str>,
+) -> Response {
+    // Phase 1: Validate + reserve ID (with lock)
+    {
+        let mut s = match store.lock() {
+            Ok(g) => g,
+            Err(_) => return Response::err("internal", "state lock poisoned"),
+        };
+        if id.trim().is_empty() {
+            return Response::err("invalid", "id cannot be empty");
+        }
+        let role_parsed = match role {
+            "supervisor" => Role::Supervisor,
+            "lead" => Role::Lead,
+            "peer" => Role::Peer,
+            other => return Response::err("invalid", format!("unknown role {other}")),
+        };
+        let harness_parsed = match harness {
+            "claude" => Harness::Claude,
+            "codex" => Harness::Codex,
+            "opencode" => Harness::OpenCode,
+            other => return Response::err("invalid", format!("unknown harness {other}")),
+        };
+        if !std::path::Path::new(repo).is_dir() {
+            return Response::err("invalid", format!("repo path does not exist: {repo}"));
+        }
+        let now = chrono::Utc::now().to_rfc3339();
+        let rec = AgentRecord {
+            id: id.to_string(),
+            role: role_parsed,
+            disposition: disposition.map(parse_disposition),
+            harness: harness_parsed,
+            parent_id: parent_id.map(str::to_string),
+            pid: None,
+            workspace: None,
+            task_path: task_path.map(str::to_string),
+            status: AgentStatus::Created,
+            restart_count: 0,
+            spawn_gen: 1,
+            last_state_change_seq: 0,
+            created_at: now.clone(),
+            updated_at: now,
+        };
+        if let Err(e) = s.insert_agent(&rec) {
+            return Response::err("duplicate", format!("cannot reserve id {id}: {e}"));
+        }
+        let _ = s.append_event(id, EventType::AgentRegistered, json!({"role": role, "harness": harness}));
+        if let Err(e) = s.update_status(id, AgentStatus::Starting) {
+            return Response::err("store", format!("{e}"));
+        }
+    } // Lock released here — Treehouse and subprocess happen WITHOUT lock
+
+    // Phase 2: Treehouse acquire + spawn subprocess (NO lock held)
+    let treehouse = Treehouse::new(resolve_treehouse());
+    let worktree = match treehouse.acquire(id, std::path::Path::new(repo)) {
+        Ok(l) => l,
+        Err(e) => {
+            // Re-acquire lock to mark failure
+            if let Ok(mut s) = store.lock() {
+                let _ = s.update_status(id, AgentStatus::Failed);
+                let _ = s.append_event(id, EventType::AgentFailed, json!({"error": format!("workspace: {e}")}));
+            }
+            return Response::err("workspace", e.to_string());
+        }
+    };
+
+    // Spawn subprocess (no lock)
+    let log_path = std::env::var("HOME")
+        .map(|h| PathBuf::from(h).join(".anti_subagent/logs"))
+        .unwrap_or_else(|_| PathBuf::from("/tmp/anti_logs"));
+    std::fs::create_dir_all(&log_path).ok();
+    let log_file = log_path.join(format!("{id}.log"));
+    let _ = std::fs::OpenOptions::new().create(true).truncate(true).write(true).open(&log_file);
+    let peer_prompt = prompt.unwrap_or("You are a peer working on this repository with the project owner. Work independently.");
+    let ctx = SpawnContext {
+        worktree: worktree.path.clone(),
+        task: task_path.map(str::to_string),
+        peer_prompt: Some(peer_prompt.to_string()),
+    };
+    let adapter: Box<dyn HarnessAdapter> = match harness {
+        "codex" => Box::new(CodexAdapter),
+        "opencode" => Box::new(OpenCodeAdapter),
+        _ => Box::new(ClaudeCodeAdapter),
+    };
+    let mut cmd = match adapter.spawn_command(&ctx) {
+        Ok(c) => c,
+        Err(e) => {
+            if let Ok(mut s) = store.lock() {
+                let _ = s.update_status(id, AgentStatus::Failed);
+            }
+            let _ = treehouse.release_if_lease(&worktree.lease_id, &worktree.path, std::path::Path::new(repo));
+            return Response::err("spawn", e.to_string());
+        }
+    };
+    cmd.stdout(std::process::Stdio::from(
+        std::fs::OpenOptions::new().create(true).append(true).open(&log_file)
+            .unwrap_or_else(|_| std::fs::OpenOptions::new().create(true).append(true).open("/dev/null").unwrap()),
+    ));
+
+    let child_result = cmd.spawn();
+
+    // Phase 3: Commit results (with lock)
+    {
+        let mut s = match store.lock() {
+            Ok(g) => g,
+            Err(_) => return Response::err("internal", "state lock poisoned"),
+        };
+        let mut c = match children.lock() {
+            Ok(g) => g,
+            Err(_) => return Response::err("internal", "children lock poisoned"),
+        };
+
+        match child_result {
+            Ok(mut child) => {
+                if let Some(task) = task_path {
+                    if let Some(mut stdin) = child.stdin.take() {
+                        use std::io::Write;
+                        let _ = stdin.write_all(task.as_bytes());
+                        drop(stdin);
+                    }
+                }
+                let pid = child.id();
+                let _ = s.attach_pid(id, pid);
+                let _ = s.update_status(id, AgentStatus::Running);
+                let _ = s.set_workspace(id, &worktree.lease_id, &worktree.path.display().to_string());
+                let _ = s.append_event(id, EventType::AgentStarted, json!({"pid": pid, "worktree": worktree.path.display().to_string()}));
+                c.insert(id.to_string(), child);
+                Response::ok(json!({
+                    "id": id,
+                    "status": "running",
+                    "pid": pid,
+                    "workspace": {"lease_id": worktree.lease_id, "path": worktree.path.display().to_string()}
+                }))
+            }
+            Err(e) => {
+                let _ = s.update_status(id, AgentStatus::Failed);
+                let _ = s.append_event(id, EventType::AgentFailed, json!({"error": e.to_string()}));
+                let _ = treehouse.release_if_lease(&worktree.lease_id, &worktree.path, std::path::Path::new(repo));
+                Response::err("spawn", format!("{e}"))
+            }
+        }
+    }
+}
+
+fn spawn_peer_impl(
+    store: &mut Store,
+    children: &mut HashMap<String, Child>,
+    id: &str,
+    role: &str,
+    disposition: Option<&str>,
+    harness: &str,
+    task_path: Option<&str>,
+    repo: &str,
+    parent_id: Option<&str>,
+    prompt: Option<&str>,
+) -> Response {
+    // 1. validate
+    if id.trim().is_empty() {
+        return Response::err("invalid", "id cannot be empty");
+    }
+    let role_parsed = match role {
+        "supervisor" => Role::Supervisor,
+        "lead" => Role::Lead,
+        "peer" => Role::Peer,
+        other => return Response::err("invalid", format!("unknown role {other}")),
+    };
+    let harness_parsed = match harness {
+        "claude" => Harness::Claude,
+        "codex" => Harness::Codex,
+        "opencode" => Harness::OpenCode,
+        other => return Response::err("invalid", format!("unknown harness {other}")),
+    };
+    if !std::path::Path::new(repo).is_dir() {
+        return Response::err("invalid", format!("repo path does not exist: {repo}"));
+    }
+
+    // 2-3. reserve id + persist metadata BEFORE spawn (firstmate lesson)
+    let now = chrono::Utc::now().to_rfc3339();
+    let rec = AgentRecord {
+        id: id.to_string(),
+        role: role_parsed,
+        disposition: disposition.map(parse_disposition),
+        harness: harness_parsed,
+        parent_id: parent_id.map(str::to_string),
+        pid: None,
+        workspace: None,
+        task_path: task_path.map(str::to_string),
+        status: AgentStatus::Created,
+        restart_count: 0,
+        spawn_gen: 1,
+        last_state_change_seq: 0,
+        created_at: now.clone(),
+        updated_at: now,
+    };
+    if let Err(e) = store.insert_agent(&rec) {
+        return Response::err("duplicate", format!("cannot reserve id {id}: {e}"));
+    }
+    let _ = store.append_event(
+        id,
+        EventType::AgentRegistered,
+        json!({"role": role, "harness": harness}),
+    );
+    if let Err(e) = store.update_status(id, AgentStatus::Starting) {
+        return Response::err("store", format!("{e}"));
+    }
+
+    // 4. allocate workspace lease (plan §19) — failure → FAILED, no ghost
+    let treehouse = Treehouse::new(resolve_treehouse());
+    let worktree = match treehouse.acquire(id, std::path::Path::new(repo)) {
+        Ok(l) => l,
+        Err(e) => {
+            let _ = store.update_status(id, AgentStatus::Failed);
+            let _ = store.append_event(
+                id,
+                EventType::AgentFailed,
+                json!({"error": format!("workspace: {e}")}),
+            );
+            return Response::err("workspace", e.to_string());
+        }
+    };
+    // Kill any stale process still running inside the freshly-leased worktree.
+    // SAFETY: Do NOT kill orphaned processes during spawn.
+    // This was causing the daemon to kill unrelated Claude sessions.
+    // Treehouse handles workspace cleanup on acquire() and return().
+    // If a worktree is dirty, Treehouse will reset it.
+    let _ = store.set_workspace(id, &worktree.lease_id, &worktree.path.display().to_string());
+
+    // 5-6. spawn the harness non-interactively inside the leased worktree
+    let log_path = std::env::var("HOME")
+        .map(|h| PathBuf::from(h).join(".anti_subagent/logs"))
+        .unwrap_or_else(|_| PathBuf::from("/tmp/anti_logs"));
+    std::fs::create_dir_all(&log_path).ok();
+    let log_file = log_path.join(format!("{id}.log"));
+    // Truncate previous session log (see restart_agent).
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&log_file);
+    let peer_prompt = prompt.unwrap_or(
+        "You are a peer working on this repository with the project owner. Work independently.",
+    );
+    // Harness adapter dispatch (plan §25).
+    let ctx = SpawnContext {
+        worktree: worktree.path.clone(),
+        task: task_path.map(str::to_string),
+        peer_prompt: Some(peer_prompt.to_string()),
+    };
+    let adapter: Box<dyn HarnessAdapter> = match harness {
+        "codex" => Box::new(CodexAdapter),
+        "opencode" => Box::new(OpenCodeAdapter),
+        _ => Box::new(ClaudeCodeAdapter),
+    };
+    let mut cmd = match adapter.spawn_command(&ctx) {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = store.update_status(id, AgentStatus::Failed);
+            return Response::err("spawn", e.to_string());
+        }
+    };
+    cmd.stdout(std::process::Stdio::from(
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_file)
+            .unwrap_or_else(|_| std::fs::OpenOptions::new().create(true).append(true).open("/dev/null").unwrap()),
+    ));
+    match cmd.spawn() {
+        Ok(mut child) => {
+            // Feed the task prompt via stdin for pipe-fed CLIs (claude -p).
+            if let Some(task) = task_path {
+                if let Some(mut stdin) = child.stdin.take() {
+                    use std::io::Write;
+                    let _ = stdin.write_all(task.as_bytes());
+                    drop(stdin);
+                }
+            }
+            let pid = child.id();
+            let _ = store.attach_pid(id, pid);
+            let _ = store.update_status(id, AgentStatus::Running);
+            let _ = store.append_event(
+                id,
+                EventType::AgentStarted,
+                json!({"pid": pid, "worktree": worktree.path.display().to_string()}),
+            );
+            children.insert(id.to_string(), child);
+            Response::ok(json!({
+                "id": id,
+                "status": "running",
+                "pid": pid,
+                "workspace": {"lease_id": worktree.lease_id, "path": worktree.path.display().to_string()}
+            }))
+        }
+        Err(e) => {
+            let _ = store.update_status(id, AgentStatus::Failed);
+            let _ = store.append_event(
+                id,
+                EventType::AgentFailed,
+                json!({"error": e.to_string()}),
+            );
+            let _ = Treehouse::new(resolve_treehouse()).release_if_lease(
+                &worktree.lease_id,
+                &worktree.path,
+                std::path::Path::new(repo),
+            );
+            Response::err("spawn", format!("{e}"))
+        }
+    }
+}
+
 fn handle_submit_work(
     store: &mut Store,
     id: &str,
