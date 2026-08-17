@@ -55,6 +55,14 @@ pub enum Request {
         disposition: String,
         tool: String,
     },
+    /// Peer reports task status. No peer_id — daemon resolves from task ownership.
+    ReportTask {
+        task_id: String,
+        status: String, // "completed" | "failed" | "progress" | "question"
+        commit: Option<String>,
+        error: Option<String>,
+        message: Option<String>,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]

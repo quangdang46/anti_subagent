@@ -196,6 +196,9 @@ fn main() {
             Request::CheckDisposition { disposition, tool } => {
                 handle_check_disposition(&disposition, &tool)
             }
+            Request::ReportTask { task_id, status, commit, error, message } => {
+                handle_report_task(store, &task_id, &status, commit.as_deref(), error.as_deref(), message.as_deref())
+            }
             Request::ListWorkItems => {
                 match store.list_work_items(None) {
                     Ok(items) => Response::ok(items),
@@ -902,6 +905,27 @@ fn handle_check_disposition(disposition_str: &str, tool: &str) -> Response {
             "reason": "tool denied for this disposition",
         })),
         Err(e) => Response::err("disposition", e.to_string()),
+    }
+}
+
+/// Stub handler for ReportTask — to be implemented in report.rs (bead yib).
+/// Returns a placeholder response for now.
+fn handle_report_task(
+    _store: &mut Store,
+    task_id: &str,
+    status: &str,
+    _commit: Option<&str>,
+    _error: Option<&str>,
+    _message: Option<&str>,
+) -> Response {
+    use anti_core::report::ReportStatus;
+    match ReportStatus::from_str(status) {
+        Ok(s) => Response::ok(json!({
+            "task_id": task_id,
+            "status": format!("{:?}", s),
+            "note": "report handler stub — full implementation pending"
+        })),
+        Err(e) => Response::err("invalid_status", e.to_string()),
     }
 }
 
