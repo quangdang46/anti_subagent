@@ -4,6 +4,7 @@
 pub mod arbiter;
 pub mod capsule;
 pub mod config;
+pub mod dispatch;
 pub mod disposition;
 pub mod events;
 pub mod loopprev;
