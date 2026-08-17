@@ -308,11 +308,22 @@ fn handle_submit_work(
     artifact_path: &str,
     review_timeout_secs: u64,
 ) -> Response {
-    let mut w = match store.get_work_item(id) {
+    let existing = store.get_work_item(id);
+    let is_new = matches!(&existing, Ok(None));
+
+    let mut w = match existing {
         Ok(Some(w)) => w,
-        Ok(None) => return Response::err("not_found", format!("work item {id} not found")),
+        Ok(None) => {
+            // Auto-create: Pending → InProgress
+            let mut w = anti_core::work::WorkItem::new(id.to_string(), "cli".into());
+            if let Err(e) = w.transition(anti_core::work::WorkItemState::InProgress) {
+                return Response::err("transition", e.to_string());
+            }
+            w
+        }
         Err(e) => return Response::err("store", e.to_string()),
     };
+
     let evidence = anti_core::work::EvidenceRef {
         sha256: sha256.to_string(),
         artifact_path: artifact_path.to_string(),
@@ -321,14 +332,18 @@ fn handle_submit_work(
     if let Err(e) = w.submit(evidence, review_timeout_secs) {
         return Response::err("transition", e.to_string());
     }
-    if let Err(e) = store.update_work_state(id, anti_core::work::WorkItemState::InProgress, anti_core::work::WorkItemState::Submitted) {
-        // Also allow NeedsRevision → Submitted
-        if let Err(e2) = store.update_work_state(id, anti_core::work::WorkItemState::NeedsRevision, anti_core::work::WorkItemState::Submitted) {
-            return Response::err("transition", format!("{e}; {e2}"));
+
+    // Save: INSERT for new items, UPDATE for existing
+    if is_new {
+        if let Err(e) = store.insert_work_item(&w) {
+            return Response::err("store", e.to_string());
         }
-    }
-    if let Err(e) = store.insert_work_item(&w) {
-        return Response::err("store", e.to_string());
+    } else {
+        let _ = store.update_work_state(id, anti_core::work::WorkItemState::InProgress, anti_core::work::WorkItemState::Submitted);
+        let _ = store.update_work_state(id, anti_core::work::WorkItemState::NeedsRevision, anti_core::work::WorkItemState::Submitted);
+        if let Err(e) = store.insert_work_item(&w) {
+            return Response::err("store", e.to_string());
+        }
     }
     let _ = store.append_event(
         id,
