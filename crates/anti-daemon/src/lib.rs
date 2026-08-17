@@ -6,6 +6,7 @@ pub mod bus;
 pub mod handoff;
 pub mod ipc;
 pub mod peer_manager;
+pub mod recovery;
 pub mod report;
 pub mod scheduler;
 pub mod store;
