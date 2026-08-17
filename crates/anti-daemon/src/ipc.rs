@@ -51,6 +51,10 @@ pub enum Request {
         id: String,
         profile: String, // "full", "check", "test", "build", or "named:<name>"
     },
+    CheckDisposition {
+        disposition: String,
+        tool: String,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]

@@ -106,7 +106,18 @@ fn main() {
             Request::Ping => Response::ok(json!({"pong": true})),
             // Guard policy: peers are never allowed to delegate (plan §22).
             Request::GuardCheck { tool } => {
-                Response::ok(json!({"tool": tool, "allowed": false}))
+                // Check if tool is delegation-shaped (existing logic)
+                let is_delegation = tool.contains("agent")
+                    || tool.contains("subagent")
+                    || tool.contains("spawn")
+                    || tool.contains("dispatch")
+                    || tool.contains("delegate");
+
+                if is_delegation {
+                    Response::ok(json!({"tool": tool, "allowed": false, "reason": "delegation-shaped tool denied"}))
+                } else {
+                    Response::ok(json!({"tool": tool, "allowed": true}))
+                }
             }
             Request::SpawnAgent {
                 id,
@@ -187,6 +198,9 @@ fn main() {
             }
             Request::VerifyWork { id, profile } => {
                 handle_verify_work(store, &id, &profile)
+            }
+            Request::CheckDisposition { disposition, tool } => {
+                handle_check_disposition(&disposition, &tool)
             }
             Request::ListWorkItems => {
                 match store.list_work_items(None) {
@@ -529,6 +543,37 @@ fn handle_verify_work(store: &mut Store, id: &str, profile_str: &str) -> Respons
         "profile": profile_str,
         "diagnostics": result.diagnostics,
     }))
+}
+
+fn handle_check_disposition(disposition_str: &str, tool: &str) -> Response {
+    use anti_core::disposition::{contract_for, DispositionError};
+    use anti_core::model::Disposition;
+
+    let disposition = match disposition_str {
+        "engineer" => Disposition::Engineer,
+        "architect" => Disposition::Architect,
+        "reviewer" => Disposition::Reviewer,
+        "scout" => Disposition::Scout,
+        "proof_auditor" | "proofauditor" => Disposition::ProofAuditor,
+        "shadow" => Disposition::Shadow,
+        _ => return Response::err("invalid", format!("unknown disposition '{disposition_str}'")),
+    };
+
+    let contract = contract_for(disposition);
+    match contract.check_tool(tool) {
+        Ok(()) => Response::ok(json!({
+            "disposition": disposition_str,
+            "tool": tool,
+            "allowed": true,
+        })),
+        Err(DispositionError::ToolDenied { .. }) => Response::ok(json!({
+            "disposition": disposition_str,
+            "tool": tool,
+            "allowed": false,
+            "reason": "tool denied for this disposition",
+        })),
+        Err(e) => Response::err("disposition", e.to_string()),
+    }
 }
 
 fn reconcile_on_start(store: &mut Store) {
