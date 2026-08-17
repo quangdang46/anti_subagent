@@ -450,7 +450,7 @@ fn reconcile_on_start(store: &mut Store) {
 
 /// Poll children with try_wait; on exit, mark the agent Completed/Crashed.
 fn reap_children(store: &mut Store, children: &mut HashMap<String, Child>) {
-    let dead: Vec<(String, bool)> = children
+    let dead: Vec<(String, bool, Option<i32>)> = children
         .iter_mut()
         .filter_map(|(id, child)| {
             child
@@ -460,12 +460,45 @@ fn reap_children(store: &mut Store, children: &mut HashMap<String, Child>) {
                 // claude -p can exit non-zero (1-2) with warnings even when
                 // the task succeeded (is_error=false in the JSON output).
                 // Treat exit code ≤ 2 as success.
-                .map(|status| (id.clone(), status.code().unwrap_or(1) <= 2))
+                .map(|status| {
+                    let code = status.code();
+                    let ok = code.unwrap_or(1) <= 2;
+                    (id.clone(), ok, code)
+                })
         })
         .collect();
-    for (id, ok) in dead {
+    for (id, ok, exit_code) in dead {
         children.remove(&id);
+
+        // Capture workspace info before mark_exit (which may clear it)
+        let workspace_lease = store.get_agent(&id).ok().flatten().and_then(|a| a.workspace);
+
         let _ = store.mark_exit(&id, ok);
+
+        // Emit structured PeerCrashed event with crash evidence
+        if !ok {
+            let payload = json!({
+                "exit_code": exit_code,
+                "workspace_lease_id": workspace_lease.as_ref().map(|w| &w.lease_id),
+                "workspace_path": workspace_lease.as_ref().map(|w| &w.path),
+                "crash_evidence": {
+                    "timestamp": chrono::Utc::now().to_rfc3339(),
+                    "process_exit_code": exit_code,
+                    "reason": if exit_code == Some(137) { "killed" } else { "crashed" },
+                },
+            });
+            let _ = store.append_event(&id, EventType::PeerCrashed, payload);
+
+            // Cleanup workspace via Treehouse (release lease + clean worktree)
+            if let Some(lease) = workspace_lease {
+                let treehouse = Treehouse::new(resolve_treehouse());
+                let _ = treehouse.release_if_lease(
+                    &lease.lease_id,
+                    std::path::Path::new(&lease.path),
+                    std::path::Path::new("."),
+                );
+            }
+        }
     }
 }
 

@@ -29,6 +29,22 @@ pub enum EventType {
     WorkAccepted,
     WorkRejected,
     ReviewEscalated,
+    // Lifecycle events (Phase 0.2)
+    PeerSpawned,
+    PeerReady,
+    PeerCrashed,
+    PeerStopped,
+    TaskReceived,
+    TaskExecuting,
+    TaskCompleted,
+    TaskFailed,
+    VerificationStarted,
+    VerificationPassed,
+    VerificationFailed,
+    WorkspaceAcquired,
+    WorkspaceReleased,
+    WorkspaceCleaned,
+    LeadHandoff,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
