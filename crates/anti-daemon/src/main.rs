@@ -338,11 +338,22 @@ fn main() {
                 std::thread::sleep(Duration::from_millis(100));
             }
         }
+        // CRITICAL: Don't hold locks during treehouse subprocess calls.
+        // reap_children returns deferred cleanups; do_cleanup runs outside lock.
+        let cleanups = {
+            let (mut s, mut c) = match (s2.lock(), c2.lock()) {
+                (Ok(s), Ok(c)) => (s, c),
+                _ => return Response::err("internal", "state lock poisoned"),
+            };
+            reap_children(&mut s, &mut c)
+        };
+        // Treehouse cleanup OUTSIDE the lock — no IPC blocking
+        do_cleanup(cleanups);
+        // Handle request
         let (mut s, mut c) = match (s2.lock(), c2.lock()) {
             (Ok(s), Ok(c)) => (s, c),
             _ => return Response::err("internal", "state lock poisoned"),
         };
-        reap_children(&mut s, &mut c);
         handle(&mut s, &mut c, req)
     };
     // serve returns Ok(()) on graceful Shutdown or Err on failure — either
@@ -645,7 +656,15 @@ fn reconcile_on_start(store: &mut Store) {
 }
 
 /// Poll children with try_wait; on exit, mark the agent Completed/Crashed.
-fn reap_children(store: &mut Store, children: &mut HashMap<String, Child>) {
+/// Work to do after releasing the lock (treehouse cleanup).
+struct DeferredCleanup {
+    id: String,
+    lease_id: String,
+    path: String,
+    exit_code: Option<i32>,
+}
+
+fn reap_children(store: &mut Store, children: &mut HashMap<String, Child>) -> Vec<DeferredCleanup> {
     let dead: Vec<(String, bool, Option<i32>)> = children
         .iter_mut()
         .filter_map(|(id, child)| {
@@ -653,9 +672,6 @@ fn reap_children(store: &mut Store, children: &mut HashMap<String, Child>) {
                 .try_wait()
                 .ok()
                 .flatten()
-                // claude -p can exit non-zero (1-2) with warnings even when
-                // the task succeeded (is_error=false in the JSON output).
-                // Treat exit code ≤ 2 as success.
                 .map(|status| {
                     let code = status.code();
                     let ok = code.unwrap_or(1) <= 2;
@@ -663,15 +679,12 @@ fn reap_children(store: &mut Store, children: &mut HashMap<String, Child>) {
                 })
         })
         .collect();
+    let mut cleanups = Vec::new();
     for (id, ok, exit_code) in dead {
         children.remove(&id);
-
-        // Capture workspace info before mark_exit (which may clear it)
         let workspace_lease = store.get_agent(&id).ok().flatten().and_then(|a| a.workspace);
-
         let _ = store.mark_exit(&id, ok);
 
-        // Emit structured PeerCrashed event with crash evidence
         if !ok {
             let payload = json!({
                 "exit_code": exit_code,
@@ -685,16 +698,30 @@ fn reap_children(store: &mut Store, children: &mut HashMap<String, Child>) {
             });
             let _ = store.append_event(&id, EventType::PeerCrashed, payload);
 
-            // Cleanup workspace via Treehouse (release lease + clean worktree)
+            // Collect for cleanup AFTER lock is released
             if let Some(lease) = workspace_lease {
-                let treehouse = Treehouse::new(resolve_treehouse());
-                let _ = treehouse.release_if_lease(
-                    &lease.lease_id,
-                    std::path::Path::new(&lease.path),
-                    std::path::Path::new("."),
-                );
+                cleanups.push(DeferredCleanup {
+                    id,
+                    lease_id: lease.lease_id,
+                    path: lease.path,
+                    exit_code,
+                });
             }
         }
+    }
+    cleanups
+}
+
+/// Perform deferred treehouse cleanup OUTSIDE the lock.
+fn do_cleanup(cleanups: Vec<DeferredCleanup>) {
+    for c in cleanups {
+        let treehouse = Treehouse::new(resolve_treehouse());
+        let _ = treehouse.release_if_lease(
+            &c.lease_id,
+            std::path::Path::new(&c.path),
+            std::path::Path::new("."),
+        );
+        eprintln!("[CLEANUP] Released workspace for crashed agent {}", c.id);
     }
 }
 
@@ -852,36 +879,10 @@ fn spawn(
         }
     };
     // Kill any stale process still running inside the freshly-leased worktree.
-    // SAFETY: Use PID-based termination from the store, not pattern matching.
-    // Pattern-based pkill -f is dangerous — it can match and kill unrelated processes.
-    // We only kill processes whose PIDs are tracked in the agent store.
-    if let Ok(agents) = store.list_agents() {
-        for agent in &agents {
-            if let Some(pid) = agent.pid {
-                // Check if this agent's workspace matches our new worktree
-                if let Some(ws) = &agent.workspace {
-                    if ws.path == worktree.path.display().to_string() && agent.id != id {
-                        // Found an orphaned process in this worktree — terminate by PID
-                        #[cfg(unix)]
-                        {
-                            let _ = std::process::Command::new("kill")
-                                .args(["-TERM", &pid.to_string()])
-                                .status();
-                            // Give it a moment to exit gracefully
-                            std::thread::sleep(std::time::Duration::from_millis(500));
-                        }
-                        #[cfg(windows)]
-                        {
-                            // On Windows, use taskkill by PID
-                            let _ = std::process::Command::new("taskkill")
-                                .args(["/F", "/PID", &pid.to_string()])
-                                .status();
-                        }
-                    }
-                }
-            }
-        }
-    }
+    // SAFETY: Do NOT kill orphaned processes during spawn.
+    // This was causing the daemon to kill unrelated Claude sessions.
+    // Treehouse handles workspace cleanup on acquire() and return().
+    // If a worktree is dirty, Treehouse will reset it.
     let _ = store.set_workspace(id, &worktree.lease_id, &worktree.path.display().to_string());
 
     // 5-6. spawn the harness non-interactively inside the leased worktree
