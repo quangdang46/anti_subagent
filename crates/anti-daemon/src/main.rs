@@ -11,6 +11,42 @@ use std::path::PathBuf;
 use std::process::Child;
 use std::time::Duration;
 
+/// Resolve treehouse binary: check TREEHOUSE_BIN env, then PATH, then fallback.
+fn resolve_treehouse() -> PathBuf {
+    // 1. Explicit env var (highest priority)
+    if let Ok(p) = std::env::var("TREEHOUSE_BIN") {
+        let path = PathBuf::from(&p);
+        if path.exists() {
+            return path;
+        }
+        // On Windows, try adding .exe if not present
+        #[cfg(windows)]
+        if !p.ends_with(".exe") {
+            let with_exe = PathBuf::from(format!("{p}.exe"));
+            if with_exe.exists() {
+                return with_exe;
+            }
+        }
+    }
+    // 2. Search PATH
+    if let Ok(output) = std::process::Command::new(if cfg!(windows) { "where" } else { "which" })
+        .arg("treehouse")
+        .output()
+    {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if let Some(first_line) = stdout.lines().next() {
+                let p = PathBuf::from(first_line.trim());
+                if p.exists() {
+                    return p;
+                }
+            }
+        }
+    }
+    // 3. Fallback
+    PathBuf::from("treehouse")
+}
+
 /// Daemonize: detach from the parent's process group/session so a killed
 /// parent shell (e.g. a timed-out Bash tool call) never takes the daemon
 /// down with it. macOS has no `setsid` binary, so we do it in-process.
@@ -199,7 +235,7 @@ fn main() {
                 .collect()
         };
         for (id, lease_id, path) in terminal {
-            let _ = Treehouse::new(PathBuf::from("treehouse")).release_if_lease(
+            let _ = Treehouse::new(resolve_treehouse()).release_if_lease(
                 &lease_id,
                 std::path::Path::new(&path),
                 std::path::Path::new(&path),
@@ -573,11 +609,7 @@ fn spawn(
     }
 
     // 4. allocate workspace lease (plan §19) — failure → FAILED, no ghost
-    let treehouse = Treehouse::new(
-        std::env::var("TREEHOUSE_BIN")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("treehouse")),
-    );
+    let treehouse = Treehouse::new(resolve_treehouse());
     let worktree = match treehouse.acquire(id, std::path::Path::new(repo)) {
         Ok(l) => l,
         Err(e) => {
@@ -672,7 +704,7 @@ fn spawn(
                 EventType::AgentFailed,
                 json!({"error": e.to_string()}),
             );
-            let _ = Treehouse::new(PathBuf::from("treehouse")).release_if_lease(
+            let _ = Treehouse::new(resolve_treehouse()).release_if_lease(
                 &worktree.lease_id,
                 &worktree.path,
                 std::path::Path::new(repo),
