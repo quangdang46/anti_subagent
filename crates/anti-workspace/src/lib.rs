@@ -7,6 +7,8 @@
 //! Idempotency: `--if-lease-id` is single-shot; on precondition failure we
 //! verify via `status --json` and treat an absent lease as already-released.
 
+pub mod cas;
+
 use std::path::PathBuf;
 use std::process::Command;
 use thiserror::Error;
