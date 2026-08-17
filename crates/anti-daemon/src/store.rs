@@ -24,6 +24,8 @@ pub enum StoreError {
     Json(#[from] serde_json::Error),
     #[error("state machine rejected transition: {0}")]
     Transition(#[from] anti_core::statemachine::TransitionError),
+    #[error("work item transition rejected: {0}")]
+    WorkTransition(#[from] anti_core::work::WorkTransitionError),
 }
 
 impl Store {
@@ -62,6 +64,23 @@ impl Store {
             CREATE TABLE IF NOT EXISTS config (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS work_items (
+                id TEXT PRIMARY KEY,
+                task_node_id TEXT NOT NULL DEFAULT '',
+                peer_id TEXT NOT NULL,
+                lead_id TEXT NOT NULL DEFAULT '',
+                state TEXT NOT NULL,
+                revision INTEGER NOT NULL DEFAULT 1,
+                max_revisions INTEGER NOT NULL DEFAULT 3,
+                evidence_sha256 TEXT,
+                evidence_path TEXT,
+                evidence_at TEXT,
+                review_verdict TEXT,
+                submitted_at TEXT,
+                review_deadline TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
             );",
         )?;
 
@@ -353,6 +372,189 @@ impl Store {
     pub fn current_sequence(&self) -> u64 {
         self.event_seq
     }
+
+    // ---- work items ----
+
+    pub fn insert_work_item(&self, w: &anti_core::work::WorkItem) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT INTO work_items (id, task_node_id, peer_id, lead_id, state, revision,
+                 max_revisions, evidence_sha256, evidence_path, evidence_at,
+                 review_verdict, submitted_at, review_deadline, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            rusqlite::params![
+                w.id,
+                w.task_node_id,
+                w.peer_id,
+                w.lead_id,
+                format!("{:?}", w.state),
+                w.revision,
+                w.max_revisions,
+                w.evidence.as_ref().map(|e| &e.sha256),
+                w.evidence.as_ref().map(|e| &e.artifact_path),
+                w.evidence.as_ref().map(|e| &e.produced_at),
+                w.review_verdict,
+                w.submitted_at,
+                w.review_deadline,
+                w.created_at,
+                w.updated_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_work_item(&self, id: &str) -> Result<Option<anti_core::work::WorkItem>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, task_node_id, peer_id, lead_id, state, revision, max_revisions,
+                    evidence_sha256, evidence_path, evidence_at,
+                    review_verdict, submitted_at, review_deadline, created_at, updated_at
+             FROM work_items WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query_map([id], |r| {
+            Ok(anti_core::work::WorkItem {
+                id: r.get(0)?,
+                task_node_id: r.get(1)?,
+                peer_id: r.get(2)?,
+                lead_id: r.get(3)?,
+                state: parse_work_state(&r.get::<_, String>(4)?),
+                revision: r.get(5)?,
+                max_revisions: r.get(6)?,
+                evidence: {
+                    let sha: Option<String> = r.get(7)?;
+                    let path: Option<String> = r.get(8)?;
+                    let at: Option<String> = r.get(9)?;
+                    match (sha, path, at) {
+                        (Some(sha256), Some(artifact_path), Some(produced_at)) => {
+                            Some(anti_core::work::EvidenceRef { sha256, artifact_path, produced_at })
+                        }
+                        _ => None,
+                    }
+                },
+                review_verdict: r.get(10)?,
+                submitted_at: r.get(11)?,
+                review_deadline: r.get(12)?,
+                created_at: r.get(13)?,
+                updated_at: r.get(14)?,
+            })
+        })?;
+        rows.next().transpose().map_err(StoreError::Sqlite)
+    }
+
+    /// Optimistic-lock: chỉ cập nhật nếu state hiện tại khớp `expected`.
+    pub fn update_work_state(
+        &self,
+        id: &str,
+        expected: anti_core::work::WorkItemState,
+        to: anti_core::work::WorkItemState,
+    ) -> Result<(), StoreError> {
+        anti_core::work::can_transition(expected, to);
+        // Validate the transition first
+        if !anti_core::work::can_transition(expected, to) {
+            return Err(StoreError::WorkTransition(
+                anti_core::work::WorkTransitionError::Invalid { from: expected, to },
+            ));
+        }
+        let changed = self.conn.execute(
+            "UPDATE work_items SET state = ?2, updated_at = datetime('now') WHERE id = ?1 AND state = ?3",
+            rusqlite::params![id, format!("{:?}", to), format!("{:?}", expected)],
+        )?;
+        if changed == 0 {
+            return Err(StoreError::WorkTransition(
+                anti_core::work::WorkTransitionError::Invalid { from: expected, to },
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn list_work_items(
+        &self,
+        state: Option<anti_core::work::WorkItemState>,
+    ) -> Result<Vec<anti_core::work::WorkItem>, StoreError> {
+        let (sql, params): (&str, Vec<Box<dyn rusqlite::types::ToSql>>) = match state {
+            Some(s) => (
+                "SELECT id, task_node_id, peer_id, lead_id, state, revision, max_revisions,
+                        evidence_sha256, evidence_path, evidence_at,
+                        review_verdict, submitted_at, review_deadline, created_at, updated_at
+                 FROM work_items WHERE state = ?1",
+                vec![Box::new(format!("{:?}", s))],
+            ),
+            None => (
+                "SELECT id, task_node_id, peer_id, lead_id, state, revision, max_revisions,
+                        evidence_sha256, evidence_path, evidence_at,
+                        review_verdict, submitted_at, review_deadline, created_at, updated_at
+                 FROM work_items",
+                vec![],
+            ),
+        };
+        let mut stmt = self.conn.prepare(sql)?;
+        let params_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        let rows = stmt.query_map(params_refs.as_slice(), |r| {
+            Ok(anti_core::work::WorkItem {
+                id: r.get(0)?,
+                task_node_id: r.get(1)?,
+                peer_id: r.get(2)?,
+                lead_id: r.get(3)?,
+                state: parse_work_state(&r.get::<_, String>(4)?),
+                revision: r.get(5)?,
+                max_revisions: r.get(6)?,
+                evidence: {
+                    let sha: Option<String> = r.get(7)?;
+                    let path: Option<String> = r.get(8)?;
+                    let at: Option<String> = r.get(9)?;
+                    match (sha, path, at) {
+                        (Some(sha256), Some(artifact_path), Some(produced_at)) => {
+                            Some(anti_core::work::EvidenceRef { sha256, artifact_path, produced_at })
+                        }
+                        _ => None,
+                    }
+                },
+                review_verdict: r.get(10)?,
+                submitted_at: r.get(11)?,
+                review_deadline: r.get(12)?,
+                created_at: r.get(13)?,
+                updated_at: r.get(14)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::Sqlite)
+    }
+
+    /// Lấy các work item quá review_deadline mà vẫn ở Submitted — watchdog dùng.
+    pub fn overdue_reviews(&self, now: &str) -> Result<Vec<anti_core::work::WorkItem>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, task_node_id, peer_id, lead_id, state, revision, max_revisions,
+                    evidence_sha256, evidence_path, evidence_at,
+                    review_verdict, submitted_at, review_deadline, created_at, updated_at
+             FROM work_items
+             WHERE state = 'Submitted' AND review_deadline IS NOT NULL AND review_deadline < ?1",
+        )?;
+        let rows = stmt.query_map([now], |r| {
+            Ok(anti_core::work::WorkItem {
+                id: r.get(0)?,
+                task_node_id: r.get(1)?,
+                peer_id: r.get(2)?,
+                lead_id: r.get(3)?,
+                state: parse_work_state(&r.get::<_, String>(4)?),
+                revision: r.get(5)?,
+                max_revisions: r.get(6)?,
+                evidence: {
+                    let sha: Option<String> = r.get(7)?;
+                    let path: Option<String> = r.get(8)?;
+                    let at: Option<String> = r.get(9)?;
+                    match (sha, path, at) {
+                        (Some(sha256), Some(artifact_path), Some(produced_at)) => {
+                            Some(anti_core::work::EvidenceRef { sha256, artifact_path, produced_at })
+                        }
+                        _ => None,
+                    }
+                },
+                review_verdict: r.get(10)?,
+                submitted_at: r.get(11)?,
+                review_deadline: r.get(12)?,
+                created_at: r.get(13)?,
+                updated_at: r.get(14)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::Sqlite)
+    }
 }
 
 fn parse_role(s: &str) -> anti_core::model::Role {
@@ -395,5 +597,61 @@ fn parse_status(s: &str) -> AgentStatus {
         "Recovering" => AgentStatus::Recovering,
         "Replaced" => AgentStatus::Replaced,
         _ => AgentStatus::Created,
+    }
+}
+
+fn parse_work_state(s: &str) -> anti_core::work::WorkItemState {
+    match s {
+        "Pending" => anti_core::work::WorkItemState::Pending,
+        "InProgress" => anti_core::work::WorkItemState::InProgress,
+        "Submitted" => anti_core::work::WorkItemState::Submitted,
+        "Verified" => anti_core::work::WorkItemState::Verified,
+        "Accepted" => anti_core::work::WorkItemState::Accepted,
+        "NeedsRevision" => anti_core::work::WorkItemState::NeedsRevision,
+        "Rejected" => anti_core::work::WorkItemState::Rejected,
+        _ => anti_core::work::WorkItemState::Pending,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anti_core::work::*;
+
+    #[test]
+    fn work_item_insert_get_transition() {
+        let dir = std::env::temp_dir().join(format!("anti-store-test-{}", std::process::id()));
+        let s = Store::open(&dir).unwrap();
+        let mut w = WorkItem::new("w1".into(), "peer-1".into());
+        s.insert_work_item(&w).unwrap();
+        w.transition(WorkItemState::InProgress).unwrap();
+        s.update_work_state("w1", WorkItemState::Pending, WorkItemState::InProgress).unwrap();
+        let got = s.get_work_item("w1").unwrap().unwrap();
+        assert_eq!(got.state, WorkItemState::InProgress);
+        assert_eq!(got.revision, 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn work_item_list_and_overdue() {
+        let dir = std::env::temp_dir().join(format!("anti-store-overdue-{}", std::process::id()));
+        let s = Store::open(&dir).unwrap();
+        let mut w = WorkItem::new("w2".into(), "peer-2".into());
+        w.transition(WorkItemState::InProgress).unwrap();
+        let evidence = EvidenceRef {
+            sha256: "abc123".into(),
+            artifact_path: "/tmp/out.txt".into(),
+            produced_at: "2026-01-01T00:00:00Z".into(),
+        };
+        w.submit(evidence, 5).unwrap(); // 5 second deadline
+        s.insert_work_item(&w).unwrap();
+        let all = s.list_work_items(None).unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].state, WorkItemState::Submitted);
+        // Overdue: deadline was 5s from creation, so "now" should be past it
+        let overdue = s.overdue_reviews("2099-01-01T00:00:00Z").unwrap();
+        assert_eq!(overdue.len(), 1);
+        assert_eq!(overdue[0].id, "w2");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
