@@ -7,11 +7,14 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Lifecycle states cho một work item — phân biệt SETTLED (submitted),
-/// VERIFIED (evidence checked), ACCEPTED (lead approved).
+/// Lifecycle states cho một work item — staged pipeline.
+/// Path: RECEIVED → EXPLORED → PLANNED → EXECUTING → EXECUTED → VERIFYING → VERIFIED → ACCEPTED
+/// Failure paths: EXECUTING→FAILED, VERIFYING→REJECTED→FIXING→EXECUTING
+/// Terminal states: ACCEPTED, REJECTED, CANCELLED, EXHAUSTED
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum WorkItemState {
+    // Legacy states (backward compatible)
     Pending,       // lead giao, peer chưa nhận
     InProgress,    // peer claim và đang làm
     Submitted,     // peer submit + evidence — SETTLED (claim)
@@ -19,11 +22,44 @@ pub enum WorkItemState {
     Accepted,      // lead accept — ACCEPTED (chỉ từ Verified)
     NeedsRevision, // reject → peer sửa lại; revision bump
     Rejected,      // terminal reject (vượt max_revisions hoặc lead hủy)
+
+    // Staged pipeline states (Phase 1)
+    Received,      // task assigned to peer
+    Explored,      // peer has investigated codebase
+    Planned,       // implementation plan created
+    Executing,     // peer actively coding
+    Executed,      // code written, awaiting verification
+    Verifying,     // verification in progress
+    Failed,        // execution failed (terminal)
+    Fixing,        // peer fixing issues after rejection
+    Exhausted,     // max_revisions exceeded (terminal)
+    Cancelled,     // task cancelled (terminal)
 }
 
 impl WorkItemState {
     pub fn is_terminal(self) -> bool {
-        matches!(self, WorkItemState::Accepted | WorkItemState::Rejected)
+        matches!(
+            self,
+            WorkItemState::Accepted
+                | WorkItemState::Rejected
+                | WorkItemState::Failed
+                | WorkItemState::Exhausted
+                | WorkItemState::Cancelled
+        )
+    }
+
+    /// Map legacy states to staged pipeline states
+    pub fn to_staged(self) -> Self {
+        match self {
+            WorkItemState::Pending => WorkItemState::Received,
+            WorkItemState::InProgress => WorkItemState::Executing,
+            WorkItemState::Submitted => WorkItemState::Executed,
+            WorkItemState::Verified => WorkItemState::Verified,
+            WorkItemState::Accepted => WorkItemState::Accepted,
+            WorkItemState::NeedsRevision => WorkItemState::Fixing,
+            WorkItemState::Rejected => WorkItemState::Rejected,
+            other => other,
+        }
     }
 }
 
@@ -274,15 +310,41 @@ pub fn can_transition(from: WorkItemState, to: WorkItemState) -> bool {
     }
     matches!(
         (from, to),
+        // Legacy transitions (backward compatible)
         (Pending, InProgress)
             | (InProgress, Submitted)
-            | (InProgress, Rejected)           // lead hủy giữa chừng
+            | (InProgress, Rejected)
             | (Submitted, Verified)
-            | (Submitted, NeedsRevision)       // reject round 1
+            | (Submitted, NeedsRevision)
             | (Verified, Accepted)
-            | (Verified, NeedsRevision)        // reject sau verify
-            | (NeedsRevision, InProgress)      // peer sửa lại
-            | (NeedsRevision, Rejected) // quá max_revisions
+            | (Verified, NeedsRevision)
+            | (NeedsRevision, InProgress)
+            | (NeedsRevision, Rejected)
+        // Staged pipeline transitions
+            | (Received, Explored)
+            | (Explored, Planned)
+            | (Planned, Executing)
+            | (Executing, Executed)
+            | (Executing, Failed)
+            | (Executed, Verifying)
+            | (Verifying, Verified)
+            | (Verifying, Rejected)
+            | (Verifying, Fixing)
+            | (Fixing, Executing)
+            | (Rejected, Exhausted)
+            | (Fixing, Exhausted)
+        // Cancellation from any non-terminal state
+            | (Received, Cancelled)
+            | (Explored, Cancelled)
+            | (Planned, Cancelled)
+            | (Executing, Cancelled)
+            | (Executed, Cancelled)
+            | (Verifying, Cancelled)
+            | (Fixing, Cancelled)
+            | (Pending, Cancelled)
+            | (InProgress, Cancelled)
+            | (Submitted, Cancelled)
+            | (Verified, Cancelled)
     )
 }
 
