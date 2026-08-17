@@ -3,9 +3,12 @@
 //! named-pipes/TCP can be swapped in later without touching callers.
 
 use serde::{Deserialize, Serialize};
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+
+#[cfg(unix)]
+use std::io::{BufRead, BufReader, Write};
+#[cfg(unix)]
+use std::os::unix::net::{UnixListener, UnixStream};
 
 pub const SOCKET_NAME: &str = "anti.sock";
 
@@ -60,6 +63,7 @@ pub fn socket_path(state_dir: &Path) -> PathBuf {
     state_dir.join(SOCKET_NAME)
 }
 
+#[cfg(unix)]
 pub fn send_request(socket: &Path, req: &Request) -> Result<Response, String> {
     let mut stream = UnixStream::connect(socket).map_err(|e| format!("cannot connect to daemon at {}: {e}", socket.display()))?;
     let line = serde_json::to_string(req).map_err(|e| e.to_string())?;
@@ -71,9 +75,26 @@ pub fn send_request(socket: &Path, req: &Request) -> Result<Response, String> {
     serde_json::from_str(&resp).map_err(|e| e.to_string())
 }
 
+#[cfg(not(unix))]
+pub fn send_request(_socket: &Path, _req: &Request) -> Result<Response, String> {
+    Err("daemon IPC is only supported on Unix (named-pipe/TCP transport not yet implemented)".into())
+}
+
+#[cfg(not(unix))]
+pub fn serve<F>(_socket: &Path, _handle: F) -> std::io::Result<()>
+where
+    F: Fn(Request) -> Response + Send + Sync + 'static,
+{
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "daemon serve is only supported on Unix (named-pipe/TCP transport not yet implemented)",
+    ))
+}
+
 /// Serve requests on a Unix socket, one thread per connection so a slow
 /// request (e.g. `anti wait` blocking for minutes) never stalls the accept
 /// loop — other clients (status/list/daemon) keep getting responses.
+#[cfg(unix)]
 pub fn serve<F>(socket: &Path, handle: F) -> std::io::Result<()>
 where
     F: Fn(Request) -> Response + Send + Sync + 'static,

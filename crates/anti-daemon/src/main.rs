@@ -38,6 +38,7 @@ fn daemonize() {
 }
 
 fn main() {
+    #[cfg(unix)]
     daemonize();
     let state_dir = std::env::var("ANTI_STATE_DIR")
         .map(PathBuf::from)

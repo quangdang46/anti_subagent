@@ -175,11 +175,15 @@ pub fn daemon(state_dir: &PathBuf, action: crate::DaemonAction) -> Result<String
             // Send a shutdown request; the daemon's serve loop exits and the
             // process terminates, removing the socket.
             let req = serde_json::json!({"method": "Shutdown"});
+            #[allow(unused_variables)]
             let line = format!("{req}\n");
-            if let Ok(stream) = std::os::unix::net::UnixStream::connect(&sock) {
-                let mut stream = stream;
-                use std::io::Write;
-                let _ = stream.write_all(line.as_bytes());
+            #[cfg(unix)]
+            {
+                if let Ok(stream) = std::os::unix::net::UnixStream::connect(&sock) {
+                    let mut stream = stream;
+                    use std::io::Write;
+                    let _ = stream.write_all(line.as_bytes());
+                }
             }
             // Wait for the socket to disappear.
             for _ in 0..50 {
