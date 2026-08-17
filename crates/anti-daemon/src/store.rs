@@ -81,11 +81,23 @@ impl Store {
                 review_deadline TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
-            );",
+            );
+            CREATE TABLE IF NOT EXISTS dispatch_events (
+                id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                peer_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                outcome TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_dispatch_task ON dispatch_events(task_id);
+            CREATE INDEX IF NOT EXISTS idx_dispatch_peer ON dispatch_events(peer_id);",
         )?;
 
         // Seed event sequence from SQLite so restart preserves ordering.
-        let seq: i64 = conn.query_row("SELECT COALESCE(MAX(seq), 0) FROM events", [], |r| r.get(0))?;
+        let seq: i64 =
+            conn.query_row("SELECT COALESCE(MAX(seq), 0) FROM events", [], |r| r.get(0))?;
         let events_dir = state_dir.join("events");
         std::fs::create_dir_all(&events_dir)?;
         let event_file = std::fs::OpenOptions::new()
@@ -130,16 +142,18 @@ impl Store {
     }
 
     pub fn get_agent(&self, id: &str) -> Result<Option<AgentRecord>, StoreError> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT id, role, disposition, harness, parent_id, pid, workspace_lease_id,
+        let mut stmt = self.conn.prepare(
+            "SELECT id, role, disposition, harness, parent_id, pid, workspace_lease_id,
                  workspace_path, task_path, status, restart_count, spawn_gen,
-                 last_state_change_seq, created_at, updated_at FROM agents WHERE id = ?1")?;
+                 last_state_change_seq, created_at, updated_at FROM agents WHERE id = ?1",
+        )?;
         let mut rows = stmt.query_map([id], |r| {
             Ok(AgentRecord {
                 id: r.get(0)?,
                 role: parse_role(&r.get::<_, String>(1)?),
-                disposition: r.get::<_, Option<String>>(2)?.map(|d| parse_disposition(&d)),
+                disposition: r
+                    .get::<_, Option<String>>(2)?
+                    .map(|d| parse_disposition(&d)),
                 harness: parse_harness(&r.get::<_, String>(3)?),
                 parent_id: r.get(4)?,
                 pid: r.get(5)?,
@@ -169,16 +183,18 @@ impl Store {
     }
 
     pub fn list_agents(&self) -> Result<Vec<AgentRecord>, StoreError> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT id, role, disposition, harness, parent_id, pid, workspace_lease_id,
+        let mut stmt = self.conn.prepare(
+            "SELECT id, role, disposition, harness, parent_id, pid, workspace_lease_id,
                  workspace_path, task_path, status, restart_count, spawn_gen,
-                 last_state_change_seq, created_at, updated_at FROM agents")?;
+                 last_state_change_seq, created_at, updated_at FROM agents",
+        )?;
         let rows = stmt.query_map([], |r| {
             Ok(AgentRecord {
                 id: r.get(0)?,
                 role: parse_role(&r.get::<_, String>(1)?),
-                disposition: r.get::<_, Option<String>>(2)?.map(|d| parse_disposition(&d)),
+                disposition: r
+                    .get::<_, Option<String>>(2)?
+                    .map(|d| parse_disposition(&d)),
                 harness: parse_harness(&r.get::<_, String>(3)?),
                 parent_id: r.get(4)?,
                 pid: r.get(5)?,
@@ -204,7 +220,8 @@ impl Store {
                 updated_at: r.get(14)?,
             })
         })?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::Sqlite)
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::Sqlite)
     }
 
     /// Optimistic-lock transition (slb pattern): fails with zero rows if the
@@ -314,14 +331,12 @@ impl Store {
 
     /// Mark an exited process: RUNNING/BLOCKED → Completed (exit 0) or Crashed.
     pub fn mark_exit(&mut self, id: &str, exit_ok: bool) -> Result<(), StoreError> {
-        let _rec = self
-            .get_agent(id)?
-            .ok_or(StoreError::Transition(
-                anti_core::statemachine::TransitionError::InvalidTransition {
-                    from: AgentStatus::Created,
-                    to: AgentStatus::Completed,
-                },
-            ))?;
+        let _rec = self.get_agent(id)?.ok_or(StoreError::Transition(
+            anti_core::statemachine::TransitionError::InvalidTransition {
+                from: AgentStatus::Created,
+                to: AgentStatus::Completed,
+            },
+        ))?;
         let to = if exit_ok {
             AgentStatus::Completed
         } else {
@@ -348,7 +363,12 @@ impl Store {
 
     // ---- events ----
 
-    pub fn append_event(&mut self, agent_id: &str, type_: EventType, payload: serde_json::Value) -> Result<Event, StoreError> {
+    pub fn append_event(
+        &mut self,
+        agent_id: &str,
+        type_: EventType,
+        payload: serde_json::Value,
+    ) -> Result<Event, StoreError> {
         self.event_seq += 1;
         let ev = Event::new(self.event_seq, agent_id, type_, payload);
         let line = serde_json::to_string(&ev)?;
@@ -424,7 +444,11 @@ impl Store {
                     let at: Option<String> = r.get(9)?;
                     match (sha, path, at) {
                         (Some(sha256), Some(artifact_path), Some(produced_at)) => {
-                            Some(anti_core::work::EvidenceRef { sha256, artifact_path, produced_at })
+                            Some(anti_core::work::EvidenceRef {
+                                sha256,
+                                artifact_path,
+                                produced_at,
+                            })
                         }
                         _ => None,
                     }
@@ -486,7 +510,8 @@ impl Store {
             ),
         };
         let mut stmt = self.conn.prepare(sql)?;
-        let params_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+            params.iter().map(|p| p.as_ref()).collect();
         let rows = stmt.query_map(params_refs.as_slice(), |r| {
             Ok(anti_core::work::WorkItem {
                 id: r.get(0)?,
@@ -502,7 +527,11 @@ impl Store {
                     let at: Option<String> = r.get(9)?;
                     match (sha, path, at) {
                         (Some(sha256), Some(artifact_path), Some(produced_at)) => {
-                            Some(anti_core::work::EvidenceRef { sha256, artifact_path, produced_at })
+                            Some(anti_core::work::EvidenceRef {
+                                sha256,
+                                artifact_path,
+                                produced_at,
+                            })
                         }
                         _ => None,
                     }
@@ -514,7 +543,8 @@ impl Store {
                 updated_at: r.get(14)?,
             })
         })?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::Sqlite)
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::Sqlite)
     }
 
     /// Get work items past review_deadline that are still Submitted — used by watchdog.
@@ -541,7 +571,11 @@ impl Store {
                     let at: Option<String> = r.get(9)?;
                     match (sha, path, at) {
                         (Some(sha256), Some(artifact_path), Some(produced_at)) => {
-                            Some(anti_core::work::EvidenceRef { sha256, artifact_path, produced_at })
+                            Some(anti_core::work::EvidenceRef {
+                                sha256,
+                                artifact_path,
+                                produced_at,
+                            })
                         }
                         _ => None,
                     }
@@ -553,7 +587,120 @@ impl Store {
                 updated_at: r.get(14)?,
             })
         })?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::Sqlite)
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::Sqlite)
+    }
+
+    // ---- dispatch events ----
+
+    pub fn insert_dispatch_event(
+        &self,
+        event: &anti_core::dispatch::DispatchEvent,
+    ) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT INTO dispatch_events (id, task_id, peer_id, status, outcome, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![
+                event.id,
+                event.task_id,
+                event.peer_id,
+                format!("{:?}", event.status),
+                event.outcome.map(|o| format!("{:?}", o)),
+                event.created_at,
+                event.updated_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_dispatch_status(
+        &self,
+        id: &str,
+        expected: anti_core::dispatch::DispatchStatus,
+        to: anti_core::dispatch::DispatchStatus,
+    ) -> Result<(), StoreError> {
+        if !anti_core::dispatch::can_transition_dispatch(expected, to) {
+            return Err(StoreError::Sqlite(rusqlite::Error::InvalidParameterName(
+                format!("dispatch transition {expected:?} → {to:?} not allowed"),
+            )));
+        }
+        let changed = self.conn.execute(
+            "UPDATE dispatch_events SET status = ?2, updated_at = datetime('now') WHERE id = ?1 AND status = ?3",
+            rusqlite::params![id, format!("{:?}", to), format!("{:?}", expected)],
+        )?;
+        if changed == 0 {
+            return Err(StoreError::Sqlite(rusqlite::Error::InvalidParameterName(
+                format!("dispatch '{id}' not found or status mismatch"),
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn record_dispatch_outcome(
+        &self,
+        id: &str,
+        outcome: anti_core::dispatch::DispatchOutcome,
+    ) -> Result<(), StoreError> {
+        let changed = self.conn.execute(
+            "UPDATE dispatch_events SET outcome = ?2, updated_at = datetime('now') WHERE id = ?1",
+            rusqlite::params![id, format!("{:?}", outcome)],
+        )?;
+        if changed == 0 {
+            return Err(StoreError::Sqlite(rusqlite::Error::InvalidParameterName(
+                format!("dispatch '{id}' not found"),
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn get_dispatch_events_by_task(
+        &self,
+        task_id: &str,
+    ) -> Result<Vec<anti_core::dispatch::DispatchEvent>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, task_id, peer_id, status, outcome, created_at, updated_at
+             FROM dispatch_events WHERE task_id = ?1 ORDER BY created_at",
+        )?;
+        let rows = stmt.query_map([task_id], |r| {
+            Ok(anti_core::dispatch::DispatchEvent {
+                id: r.get(0)?,
+                task_id: r.get(1)?,
+                peer_id: r.get(2)?,
+                status: parse_dispatch_status(&r.get::<_, String>(3)?),
+                outcome: r
+                    .get::<_, Option<String>>(4)?
+                    .and_then(|o| parse_dispatch_outcome(&o)),
+                created_at: r.get(5)?,
+                updated_at: r.get(6)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::Sqlite)
+    }
+
+    pub fn get_dispatch_events_by_peer(
+        &self,
+        peer_id: &str,
+    ) -> Result<Vec<anti_core::dispatch::DispatchEvent>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, task_id, peer_id, status, outcome, created_at, updated_at
+             FROM dispatch_events WHERE peer_id = ?1 ORDER BY created_at",
+        )?;
+        let rows = stmt.query_map([peer_id], |r| {
+            Ok(anti_core::dispatch::DispatchEvent {
+                id: r.get(0)?,
+                task_id: r.get(1)?,
+                peer_id: r.get(2)?,
+                status: parse_dispatch_status(&r.get::<_, String>(3)?),
+                outcome: r
+                    .get::<_, Option<String>>(4)?
+                    .and_then(|o| parse_dispatch_outcome(&o)),
+                created_at: r.get(5)?,
+                updated_at: r.get(6)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::Sqlite)
     }
 }
 
@@ -581,6 +728,35 @@ fn parse_harness(s: &str) -> anti_core::model::Harness {
         "codex" => anti_core::model::Harness::Codex,
         "opencode" => anti_core::model::Harness::OpenCode,
         _ => anti_core::model::Harness::Claude,
+    }
+}
+
+fn parse_dispatch_status(s: &str) -> anti_core::dispatch::DispatchStatus {
+    match s {
+        "Pending" => anti_core::dispatch::DispatchStatus::Pending,
+        "Notified" => anti_core::dispatch::DispatchStatus::Notified,
+        "Delivered" => anti_core::dispatch::DispatchStatus::Delivered,
+        "Completed" => anti_core::dispatch::DispatchStatus::Completed,
+        "Failed" => anti_core::dispatch::DispatchStatus::Failed,
+        "Deferred" => anti_core::dispatch::DispatchStatus::Deferred,
+        "Cancelled" => anti_core::dispatch::DispatchStatus::Cancelled,
+        _ => anti_core::dispatch::DispatchStatus::Pending,
+    }
+}
+
+fn parse_dispatch_outcome(s: &str) -> Option<anti_core::dispatch::DispatchOutcome> {
+    match s {
+        "DeliveredConfirmed" => Some(anti_core::dispatch::DispatchOutcome::DeliveredConfirmed),
+        "DeliveredUnconfirmed" => Some(anti_core::dispatch::DispatchOutcome::DeliveredUnconfirmed),
+        "CompletedConfirmed" => Some(anti_core::dispatch::DispatchOutcome::CompletedConfirmed),
+        "CompletedUnverified" => Some(anti_core::dispatch::DispatchOutcome::CompletedUnverified),
+        "TargetMissing" => Some(anti_core::dispatch::DispatchOutcome::TargetMissing),
+        "TargetUnavailable" => Some(anti_core::dispatch::DispatchOutcome::TargetUnavailable),
+        "PreflightFailed" => Some(anti_core::dispatch::DispatchOutcome::PreflightFailed),
+        "SendFailed" => Some(anti_core::dispatch::DispatchOutcome::SendFailed),
+        "Timeout" => Some(anti_core::dispatch::DispatchOutcome::Timeout),
+        "Cancelled" => Some(anti_core::dispatch::DispatchOutcome::Cancelled),
+        _ => None,
     }
 }
 
@@ -625,7 +801,8 @@ mod tests {
         let mut w = WorkItem::new("w1".into(), "peer-1".into());
         s.insert_work_item(&w).unwrap();
         w.transition(WorkItemState::InProgress).unwrap();
-        s.update_work_state("w1", WorkItemState::Pending, WorkItemState::InProgress).unwrap();
+        s.update_work_state("w1", WorkItemState::Pending, WorkItemState::InProgress)
+            .unwrap();
         let got = s.get_work_item("w1").unwrap().unwrap();
         assert_eq!(got.state, WorkItemState::InProgress);
         assert_eq!(got.revision, 1);
@@ -652,6 +829,110 @@ mod tests {
         let overdue = s.overdue_reviews("2099-01-01T00:00:00Z").unwrap();
         assert_eq!(overdue.len(), 1);
         assert_eq!(overdue[0].id, "w2");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dispatch_event_insert_and_query_by_task() {
+        let dir =
+            std::env::temp_dir().join(format!("anti-dispatch-test-task-{}", std::process::id()));
+        let s = Store::open(&dir).unwrap();
+        let event = anti_core::dispatch::DispatchEvent {
+            id: "d1".into(),
+            task_id: "t1".into(),
+            peer_id: "p1".into(),
+            status: anti_core::dispatch::DispatchStatus::Pending,
+            outcome: None,
+            created_at: "2026-01-01T00:00:00Z".into(),
+            updated_at: "2026-01-01T00:00:00Z".into(),
+        };
+        s.insert_dispatch_event(&event).unwrap();
+        let events = s.get_dispatch_events_by_task("t1").unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].id, "d1");
+        assert_eq!(
+            events[0].status,
+            anti_core::dispatch::DispatchStatus::Pending
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dispatch_event_query_by_peer() {
+        let dir =
+            std::env::temp_dir().join(format!("anti-dispatch-test-peer-{}", std::process::id()));
+        let s = Store::open(&dir).unwrap();
+        for i in 0..3 {
+            let event = anti_core::dispatch::DispatchEvent {
+                id: format!("d{i}"),
+                task_id: format!("t{i}"),
+                peer_id: "p1".into(),
+                status: anti_core::dispatch::DispatchStatus::Pending,
+                outcome: None,
+                created_at: "2026-01-01T00:00:00Z".into(),
+                updated_at: "2026-01-01T00:00:00Z".into(),
+            };
+            s.insert_dispatch_event(&event).unwrap();
+        }
+        let events = s.get_dispatch_events_by_peer("p1").unwrap();
+        assert_eq!(events.len(), 3);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dispatch_status_update_with_optimistic_lock() {
+        let dir =
+            std::env::temp_dir().join(format!("anti-dispatch-test-update-{}", std::process::id()));
+        let s = Store::open(&dir).unwrap();
+        let event = anti_core::dispatch::DispatchEvent {
+            id: "d1".into(),
+            task_id: "t1".into(),
+            peer_id: "p1".into(),
+            status: anti_core::dispatch::DispatchStatus::Pending,
+            outcome: None,
+            created_at: "2026-01-01T00:00:00Z".into(),
+            updated_at: "2026-01-01T00:00:00Z".into(),
+        };
+        s.insert_dispatch_event(&event).unwrap();
+        s.update_dispatch_status(
+            "d1",
+            anti_core::dispatch::DispatchStatus::Pending,
+            anti_core::dispatch::DispatchStatus::Notified,
+        )
+        .unwrap();
+        let events = s.get_dispatch_events_by_task("t1").unwrap();
+        assert_eq!(
+            events[0].status,
+            anti_core::dispatch::DispatchStatus::Notified
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dispatch_outcome_recording() {
+        let dir =
+            std::env::temp_dir().join(format!("anti-dispatch-test-outcome-{}", std::process::id()));
+        let s = Store::open(&dir).unwrap();
+        let event = anti_core::dispatch::DispatchEvent {
+            id: "d1".into(),
+            task_id: "t1".into(),
+            peer_id: "p1".into(),
+            status: anti_core::dispatch::DispatchStatus::Completed,
+            outcome: None,
+            created_at: "2026-01-01T00:00:00Z".into(),
+            updated_at: "2026-01-01T00:00:00Z".into(),
+        };
+        s.insert_dispatch_event(&event).unwrap();
+        s.record_dispatch_outcome(
+            "d1",
+            anti_core::dispatch::DispatchOutcome::CompletedConfirmed,
+        )
+        .unwrap();
+        let events = s.get_dispatch_events_by_task("t1").unwrap();
+        assert_eq!(
+            events[0].outcome,
+            Some(anti_core::dispatch::DispatchOutcome::CompletedConfirmed)
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
