@@ -209,6 +209,38 @@ fn main() {
             }
         }
     });
+    // Review watchdog: mỗi 15s, quét overdue reviews.
+    // Bài học veylen: lead im lặng = kẹt vô thời hạn. Escalate, không auto-accept.
+    let watchdog_store = store.clone();
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_secs(15));
+        let s = match watchdog_store.lock() {
+            Ok(g) => g,
+            Err(_) => continue,
+        };
+        let now = chrono::Utc::now().to_rfc3339();
+        let overdue = match s.overdue_reviews(&now) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        for w in overdue {
+            let mut s = match watchdog_store.lock() {
+                Ok(g) => g,
+                Err(_) => continue,
+            };
+            let _ = s.append_event(
+                &w.id,
+                EventType::ReviewEscalated,
+                json!({
+                    "peer_id": w.peer_id,
+                    "lead_id": w.lead_id,
+                    "revision": w.revision,
+                    "deadline": w.review_deadline,
+                    "action": "supervisor intervention required",
+                }),
+            );
+        }
+    });
     let (s2, c2) = (store.clone(), children.clone());
     let dispatch = move |req: Request| -> Response {
         // WaitAgent must NOT hold the state locks while it loops for minutes —
