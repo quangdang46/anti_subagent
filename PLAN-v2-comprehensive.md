@@ -112,10 +112,16 @@ anti_subagent is an **SLP (Supervisor → Lead → Peer) orchestration daemon** 
 ```
 anti_subagent daemon
     │
-    ├── PeerManager
-    │   ├── Process lifecycle (spawn, wait, terminate)
-    │   ├── TreehouseAdapter (workspace lifecycle)
-    │   └── CrashDetector (PID liveness)
+    ├── PeerManager                    ← PROCESS lifecycle (spawn/wait/terminate)
+    │   ├── spawn(spec) → PeerHandle   ← creates OS process
+    │   ├── wait(handle) → ExitStatus  ← blocks until exit
+    │   ├── terminate(handle)           ← sends SIGTERM/SIGKILL (OS-native)
+    │   └── CrashDetector              ← PID liveness monitoring
+    │
+    ├── TreehouseAdapter               ← WORKSPACE lifecycle (lease/worktree/cleanup)
+    │   ├── acquire(holder, repo) → Lease
+    │   ├── release_if_lease(lease)     ← cleanup + release workspace
+    │   └── status() → PoolStatus
     │
     ├── TaskStateMachine
     │   ├── Staged pipeline (RECEIVED → ... → ACCEPTED)
@@ -138,6 +144,12 @@ anti_subagent daemon
         ├── Peer assignment by disposition
         └── Resource-aware parallelism
 ```
+
+**Boundary contract:**
+- PeerManager owns process lifecycle (spawn, wait, terminate by PID)
+- TreehouseAdapter owns workspace lifecycle (lease, worktree, cleanup)
+- On peer crash: PeerManager detects → emits PeerCrashed → handler calls TreehouseAdapter.release_if_lease()
+- Do NOT let Treehouse become the "kill API" — it is a workspace manager, not a process manager
 
 ---
 
@@ -212,11 +224,26 @@ Request::ReviewWork { id, verdict: "accept", note } => {
 }
 ```
 
-**Target:**
+**Target — VerificationProfile (NOT arbitrary commands):**
 ```rust
-// Verification must produce evidence
+/// Predefined verification profiles — no arbitrary commands from caller.
+/// Verifier runs the profile, not the commands.
+pub enum VerifyProfile {
+    /// cargo fmt --check + cargo clippy + cargo test + cargo build
+    Full,
+    /// cargo fmt --check + cargo clippy + cargo test
+    Check,
+    /// cargo test only
+    Test,
+    /// cargo build only
+    Build,
+    /// Custom profile defined in project config (not arbitrary CLI)
+    Named(String),
+}
+
 struct VerificationResult {
     status: VerifyStatus, // PASS | FAIL | INCOMPLETE
+    profile: VerifyProfile,
     test_output: Option<String>,
     build_output: Option<String>,
     diagnostics: Vec<String>,
@@ -225,21 +252,27 @@ struct VerificationResult {
     timestamp: String,
 }
 
-// Verify command
+// Verify command — caller selects profile, not commands
 Request::VerifyWork {
     id: String,
-    commands: Vec<String>,  // ["cargo test", "cargo build", "cargo clippy"]
+    profile: VerifyProfile,
 }
 
 // After verify → state becomes Verified
 // Then accept is allowed
 ```
 
+**Why profiles, not commands:**
+- Prevents execution escape hatch (caller can't inject arbitrary CLI)
+- Verifier runs standardized checks, not caller-specified commands
+- Evidence is comparable across runs (same profile = same checks)
+- Configurable via project config (`.anti_subagent/verify.toml`) but not per-call
+
 **Files to modify:**
-- `crates/anti-core/src/work.rs` — VerificationResult struct
+- `crates/anti-core/src/work.rs` — VerifyProfile, VerificationResult
 - `crates/anti-daemon/src/ipc.rs` — VerifyWork request
 - `crates/anti-daemon/src/main.rs` — verify handler
-- `crates/anti-cli/src/main.rs` — verify command
+- `crates/anti-cli/src/main.rs` — verify command with profile flag
 
 ---
 
@@ -395,26 +428,54 @@ pub enum LifecycleEvent {
 
 ### Phase 3: Scheduling & Routing (P3) — 2 weeks
 
-#### 4.3.1 Model routing
+#### 4.3.1 Model routing (config-based, not hard-coded)
 
 ```rust
-pub struct ModelRoute {
-    pub disposition: Disposition,
-    pub complexity: Complexity,  // LOW | MEDIUM | HIGH
-    pub provider: Provider,     // claude | codex | opencode
-    pub model: String,          // haiku | sonnet | opus
+/// Capability tier — disposition × complexity → required capability level.
+/// Model name resolution is config/provider-specific, NOT hard-coded in core.
+pub enum CapabilityTier {
+    /// Quick lookups, search, narrow checks
+    Lightweight,
+    /// Standard implementation, debugging, reviews
+    Standard,
+    /// Architecture, deep analysis, complex refactors
+    Heavyweight,
 }
 
+pub struct ModelRoute {
+    pub disposition: Disposition,
+    pub complexity: Complexity,     // LOW | MEDIUM | HIGH
+    pub capability: CapabilityTier, // resolved from disposition × complexity
+    pub provider: String,           // "claude" | "codex" | "opencode" (config)
+    pub model: String,              // resolved from provider + capability (config)
+}
+
+/// Route resolution: disposition × complexity → capability → model
+/// Model names come from provider config, NOT from anti-core.
 impl ModelRoute {
-    pub fn route(disposition: Disposition, complexity: Complexity) -> Self {
-        match (disposition, complexity) {
-            (Scout, _) => Self { model: "haiku".into(), .. },
-            (Engineer, LOW) => Self { model: "sonnet".into(), .. },
-            (Engineer, HIGH) => Self { model: "opus".into(), .. },
-            (ProofAuditor, _) => Self { model: "opus".into(), .. },
-            // ...
-        }
+    pub fn resolve(disposition: Disposition, complexity: Complexity, config: &ProviderConfig) -> Self {
+        let capability = match (&disposition, &complexity) {
+            (Scout, _) => CapabilityTier::Lightweight,
+            (Engineer, Complexity::Low) => CapabilityTier::Standard,
+            (Engineer, Complexity::High) => CapabilityTier::Heavyweight,
+            (ProofAuditor, _) => CapabilityTier::Heavyweight,
+            _ => CapabilityTier::Standard,
+        };
+        let (provider, model) = config.resolve(&capability);
+        Self { disposition, complexity, capability, provider, model }
     }
+}
+
+/// Provider config — loaded from .anti_subagent/providers.toml
+/// NOT hard-coded in anti-core
+pub struct ProviderConfig {
+    pub providers: HashMap<String, ProviderTier>,
+}
+
+pub struct ProviderTier {
+    pub lightweight: String,  // model name for lightweight tier
+    pub standard: String,     // model name for standard tier
+    pub heavyweight: String,  // model name for heavyweight tier
 }
 ```
 
@@ -653,9 +714,10 @@ CREATE TABLE evidence_records (
 ## 9. Success Criteria
 
 ### Phase 0
-- [ ] No pkill -f anywhere in codebase
-- [ ] Crash cleanup via Treehouse verified
-- [ ] Verify stage produces evidence
+- [ ] No unsafe pattern-based process termination anywhere in production code
+- [ ] PeerManager owns process lifecycle, TreehouseAdapter owns workspace lifecycle
+- [ ] Crash cleanup: PeerManager detects → PeerCrashed event → TreehouseAdapter releases
+- [ ] VerifyProfile-based verification (no arbitrary command execution)
 - [ ] All existing tests pass
 - [ ] New safety tests pass
 
@@ -690,7 +752,7 @@ CREATE TABLE evidence_records (
 | Staged pipeline | plan → prd → exec → verify → fix | RECEIVED → EXPLORE → PLAN → EXECUTE → VERIFY → ACCEPT |
 | Evidence verification | Fresh test output, lsp_diagnostics | test_output, build_output, git_diff, diagnostics |
 | Hook system | 20 hooks on 11 lifecycle events | LifecycleBus with 15+ event types |
-| Model routing | haiku → sonnet → opus by complexity | disposition × complexity → model |
+| Model routing | haiku → sonnet → opus by complexity | disposition × complexity → capability tier → config-resolved model |
 | Kill safety | SubagentStop hook cleanup | Treehouse.return() |
 | State persistence | .omc/state/ with PID-aware liveness | SQLite daemon with PID recovery |
 | Commit protocol | Git trailers (Constraint/Rejected/Confidence) | Evidence trail in SQLite |
