@@ -258,34 +258,37 @@ fn main() {
     });
     // Review watchdog: scan overdue reviews every 15s.
     // Lesson from veylen: silent lead = stuck indefinitely. Escalate, no auto-accept.
+    // INVARIANT: No external/blocking operation while holding store Mutex.
     let watchdog_store = store.clone();
     std::thread::spawn(move || loop {
         std::thread::sleep(Duration::from_secs(15));
-        let s = match watchdog_store.lock() {
-            Ok(g) => g,
-            Err(_) => continue,
-        };
-        let now = chrono::Utc::now().to_rfc3339();
-        let overdue = match s.overdue_reviews(&now) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        for w in overdue {
-            let mut s = match watchdog_store.lock() {
+        // Phase 1: Read overdue reviews (lock, read, unlock)
+        let overdue: Vec<_> = {
+            let s = match watchdog_store.lock() {
                 Ok(g) => g,
                 Err(_) => continue,
             };
-            let _ = s.append_event(
-                &w.id,
-                EventType::ReviewEscalated,
-                json!({
-                    "peer_id": w.peer_id,
-                    "lead_id": w.lead_id,
-                    "revision": w.revision,
-                    "deadline": w.review_deadline,
-                    "action": "supervisor intervention required",
-                }),
-            );
+            let now = chrono::Utc::now().to_rfc3339();
+            match s.overdue_reviews(&now) {
+                Ok(v) => v,
+                Err(_) => continue,
+            }
+        }; // lock released here
+        // Phase 2: Emit events (lock per event, brief)
+        for w in overdue {
+            if let Ok(mut s) = watchdog_store.lock() {
+                let _ = s.append_event(
+                    &w.id,
+                    EventType::ReviewEscalated,
+                    json!({
+                        "peer_id": w.peer_id,
+                        "lead_id": w.lead_id,
+                        "revision": w.revision,
+                        "deadline": w.review_deadline,
+                        "action": "supervisor intervention required",
+                    }),
+                );
+            }
         }
     });
     let (s2, c2) = (store.clone(), children.clone());
