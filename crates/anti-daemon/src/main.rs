@@ -622,13 +622,37 @@ fn spawn(
             return Response::err("workspace", e.to_string());
         }
     };
-    // Kill any stale process still running inside the freshly-leased worktree
-    // (e.g. an orphaned peer from a previous run whose lease was released but
-    // whose process survived). A stale process would make treehouse treat the
-    // worktree as in-use on the next acquire, starving the pool.
-    let _ = std::process::Command::new("pkill")
-        .args(["-f", &format!("claude -p.*{}", worktree.path.display())])
-        .status();
+    // Kill any stale process still running inside the freshly-leased worktree.
+    // SAFETY: Use PID-based termination from the store, not pattern matching.
+    // Pattern-based pkill -f is dangerous — it can match and kill unrelated processes.
+    // We only kill processes whose PIDs are tracked in the agent store.
+    if let Ok(agents) = store.list_agents() {
+        for agent in &agents {
+            if let Some(pid) = agent.pid {
+                // Check if this agent's workspace matches our new worktree
+                if let Some(ws) = &agent.workspace {
+                    if ws.path == worktree.path.display().to_string() && agent.id != id {
+                        // Found an orphaned process in this worktree — terminate by PID
+                        #[cfg(unix)]
+                        {
+                            let _ = std::process::Command::new("kill")
+                                .args(["-TERM", &pid.to_string()])
+                                .status();
+                            // Give it a moment to exit gracefully
+                            std::thread::sleep(std::time::Duration::from_millis(500));
+                        }
+                        #[cfg(windows)]
+                        {
+                            // On Windows, use taskkill by PID
+                            let _ = std::process::Command::new("taskkill")
+                                .args(["/F", "/PID", &pid.to_string()])
+                                .status();
+                        }
+                    }
+                }
+            }
+        }
+    }
     let _ = store.set_workspace(id, &worktree.lease_id, &worktree.path.display().to_string());
 
     // 5-6. spawn the harness non-interactively inside the leased worktree
