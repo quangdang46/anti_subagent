@@ -16,7 +16,8 @@ use std::time::Duration;
 
 use thiserror::Error;
 use treehouse_core::config::TreehouseConfig;
-use treehouse_core::gc::{GcOptions, GcResult};
+use treehouse_core::gc::GcOptions;
+pub use treehouse_core::gc::GcResult;
 use treehouse_core::pool::{Acquired, OpenOptions, Pool, PoolError, WorktreeStatus};
 
 // ── Environment ──────────────────────────────────────────────────────

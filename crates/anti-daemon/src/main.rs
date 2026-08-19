@@ -66,18 +66,18 @@ fn main() {
         }
     };
 
+    // Shared Treehouse instance — single pool handle across all threads.
+    let treehouse = Arc::new(make_treehouse(&state_dir));
+
     // Reconcile on restart (plan §23): peers whose processes died while the
     // daemon was down become CRASHED/COMPLETED.
-    reconcile_on_start(&mut store, &state_dir);
-
-    // Wrap state_dir in Arc so the 'static closure can own a reference.
-    let state_dir = Arc::new(state_dir);
+    reconcile_on_start(&mut store, &treehouse);
 
     // Track live children so a peer's exit becomes AGENT_COMPLETED/CRASHED.
     let children: HashMap<String, Child> = HashMap::new();
 
     // Clone Arc for the closure (ipc::serve requires 'static).
-    let state_dir_for_closure = Arc::clone(&state_dir);
+    let treehouse_for_closure = Arc::clone(&treehouse);
 
     let handle = move |store: &mut Store,
                        children: &mut HashMap<String, Child>,
@@ -123,7 +123,7 @@ fn main() {
                 &repo,
                 parent_id.as_deref(),
                 prompt.as_deref(),
-                &state_dir_for_closure,
+                &treehouse_for_closure,
             ),
             Request::ListAgents => match store.list_agents() {
                 Ok(agents) => Response::ok(agents),
@@ -245,7 +245,7 @@ fn main() {
     // block), so it never stalls IPC. Treehouse acquire skips leased
     // worktrees, but without this the pool fills up over many runs.
     let sweeper_store = store.clone();
-    let state_dir_sweeper = Arc::clone(&state_dir);
+    let treehouse_sweeper = Arc::clone(&treehouse);
     std::thread::spawn(move || {
         loop {
             std::thread::sleep(Duration::from_secs(15));
@@ -265,7 +265,7 @@ fn main() {
                     .collect()
             };
             for (id, _lease_id, path) in terminal {
-                let _ = make_treehouse(&state_dir_sweeper).release(
+                let _ = treehouse_sweeper.release(
                     std::path::Path::new(&path),
                     std::path::Path::new(&path),
                     None,
@@ -314,7 +314,7 @@ fn main() {
         }
     });
     let (s2, c2) = (store.clone(), children.clone());
-    let state_dir_dispatch = Arc::clone(&state_dir);
+    let treehouse_dispatch = Arc::clone(&treehouse);
     let dispatch = move |req: Request| -> Response {
         // WaitAgent must NOT hold the state locks while it loops for minutes —
         // that would starve every other request. It polls with short, discrete
@@ -371,7 +371,7 @@ fn main() {
             reap_children(&mut s, &mut c)
         };
         // Treehouse cleanup OUTSIDE the lock — no IPC blocking
-        do_cleanup(cleanups, &state_dir_dispatch);
+        do_cleanup(cleanups, &treehouse_dispatch);
         // Handle request
         let (mut s, mut c) = match (s2.lock(), c2.lock()) {
             (Ok(s), Ok(c)) => (s, c),
@@ -383,6 +383,16 @@ fn main() {
     // way the daemon process must exit so the socket is cleaned up.
     if let Err(e) = ipc::serve(&socket, dispatch) {
         eprintln!("anti-daemon: server error: {e}");
+    }
+    // GC orphaned worktrees on shutdown.
+    if let Ok(result) = treehouse.gc(std::path::Path::new("."), None) {
+        if !result.reclaimed.is_empty() {
+            eprintln!(
+                "[GC] reclaimed {} worktrees ({} bytes)",
+                result.reclaimed.len(),
+                result.freed_bytes
+            );
+        }
     }
     std::process::exit(0);
 }
@@ -403,7 +413,7 @@ fn spawn_peer(
     repo: &str,
     parent_id: Option<&str>,
     prompt: Option<&str>,
-    state_dir: &std::path::Path,
+    treehouse: &Treehouse,
 ) -> Response {
     // Phase 1: Validate + reserve ID (with lock)
     {
@@ -460,7 +470,6 @@ fn spawn_peer(
     } // Lock released here — Treehouse and subprocess happen WITHOUT lock
 
     // Phase 2: Treehouse acquire + spawn subprocess (NO lock held)
-    let treehouse = make_treehouse(state_dir);
     let worktree = match treehouse.acquire(std::path::Path::new(repo), None, id) {
         Ok(l) => l,
         Err(e) => {
@@ -586,7 +595,7 @@ fn spawn_peer_impl(
     repo: &str,
     parent_id: Option<&str>,
     prompt: Option<&str>,
-    state_dir: &std::path::Path,
+    treehouse: &Treehouse,
 ) -> Response {
     // 1. validate
     if id.trim().is_empty() {
@@ -639,7 +648,6 @@ fn spawn_peer_impl(
     }
 
     // 4. allocate workspace lease (plan §19) — failure → FAILED, no ghost
-    let treehouse = make_treehouse(state_dir);
     let worktree = match treehouse.acquire(std::path::Path::new(repo), None, id) {
         Ok(l) => l,
         Err(e) => {
@@ -734,8 +742,7 @@ fn spawn_peer_impl(
         Err(e) => {
             let _ = store.update_status(id, AgentStatus::Failed);
             let _ = store.append_event(id, EventType::AgentFailed, json!({"error": e.to_string()}));
-            let _ =
-                make_treehouse(state_dir).release(&worktree.path, std::path::Path::new(repo), None);
+            let _ = treehouse.release(&worktree.path, std::path::Path::new(repo), None);
             Response::err("spawn", format!("{e}"))
         }
     }
@@ -1013,7 +1020,7 @@ fn handle_report_task(
     }
 }
 
-fn reconcile_on_start(store: &mut Store, state_dir: &std::path::Path) {
+fn reconcile_on_start(store: &mut Store, treehouse: &Treehouse) {
     // Phase 1: Collect dead agents (no Treehouse ops)
     let dead_agents: Vec<AgentRecord> = {
         let agents = match store.list_agents() {
@@ -1058,7 +1065,6 @@ fn reconcile_on_start(store: &mut Store, state_dir: &std::path::Path) {
     };
 
     // Phase 2: Treehouse cleanup (no lock held)
-    let treehouse = make_treehouse(state_dir);
     for rec in &dead_agents {
         if let Some(workspace) = &rec.workspace {
             let _ = treehouse.release(
@@ -1147,8 +1153,7 @@ fn reap_children(store: &mut Store, children: &mut HashMap<String, Child>) -> Ve
 }
 
 /// Perform deferred treehouse cleanup OUTSIDE the lock.
-fn do_cleanup(cleanups: Vec<DeferredCleanup>, state_dir: &std::path::Path) {
-    let treehouse = make_treehouse(state_dir);
+fn do_cleanup(cleanups: Vec<DeferredCleanup>, treehouse: &Treehouse) {
     for c in cleanups {
         let _ = treehouse.release(
             std::path::Path::new(&c.path),
@@ -1261,7 +1266,7 @@ fn spawn(
     repo: &str,
     parent_id: Option<&str>,
     prompt: Option<&str>,
-    state_dir: &std::path::Path,
+    treehouse: &Treehouse,
 ) -> Response {
     // 1. validate
     if id.trim().is_empty() {
@@ -1314,7 +1319,6 @@ fn spawn(
     }
 
     // 4. allocate workspace lease (plan §19) — failure → FAILED, no ghost
-    let treehouse = make_treehouse(state_dir);
     let worktree = match treehouse.acquire(std::path::Path::new(repo), None, id) {
         Ok(l) => l,
         Err(e) => {
@@ -1409,8 +1413,7 @@ fn spawn(
         Err(e) => {
             let _ = store.update_status(id, AgentStatus::Failed);
             let _ = store.append_event(id, EventType::AgentFailed, json!({"error": e.to_string()}));
-            let _ =
-                make_treehouse(state_dir).release(&worktree.path, std::path::Path::new(repo), None);
+            let _ = treehouse.release(&worktree.path, std::path::Path::new(repo), None);
             Response::err("spawn", format!("{e}"))
         }
     }

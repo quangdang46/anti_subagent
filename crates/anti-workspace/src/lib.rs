@@ -12,7 +12,7 @@ pub mod cas;
 pub mod pool;
 
 // Re-export pool adapter types for convenient access.
-pub use pool::{AntiEnv, AntiPool, AntiPoolError, PoolConfig};
+pub use pool::{AntiEnv, AntiPool, AntiPoolError, GcResult, PoolConfig};
 
 use std::path::PathBuf;
 use thiserror::Error;
@@ -97,6 +97,15 @@ impl Treehouse {
         self.pool
             .release(worktree_path.to_str().unwrap_or(""), repo_root, remote_url)?;
         Ok(())
+    }
+
+    /// Run garbage collection on the pool (dry-run by default).
+    pub fn gc(
+        &self,
+        repo_root: &std::path::Path,
+        remote_url: Option<&str>,
+    ) -> Result<pool::GcResult, WorkspaceError> {
+        Ok(self.pool.gc(repo_root, remote_url)?)
     }
 }
 
