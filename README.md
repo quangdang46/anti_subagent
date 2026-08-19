@@ -117,25 +117,6 @@ Every existing tool covers one piece of the workflow — none covers the supervi
 
 ---
 
-## Applied patterns (from Reina research → implementation)
-
-| Pattern | Source | Implementation |
-|---|---|---|
-| ✅ WorkItem evidence-gated lifecycle (SETTLED ≠ VERIFIED ≠ ACCEPTED) | irina `src/verification.ts:282-333` | `crates/anti-core/src/work.rs` — 7-state machine, 4 transition tests |
-| ✅ Generation-fenced WorkspaceLease | irina `src/lease.ts:415-440` | `crates/anti-core/src/model.rs` — `generation: u64` + `FenceError` |
-| ✅ Review deadline + watchdog escalation | veylen lesson (no auto-accept) | `crates/anti-daemon/src/main.rs` — watchdog thread, `ReviewEscalated` event |
-| ✅ Loop-prevention sliding window + hysteresis + cooldown | veylen `SubscriptionEvaluator.ts:308-423` | `crates/anti-core/src/loopprev.rs` — trigger >3, reset ≤1, cooldown 10m |
-| ✅ Reject bumps revision (group counter reset) | veylen fix | `crates/anti-core/src/work.rs` — `reject()` increments `revision` |
-| ✅ CAS write-if-unchanged + lock marker | maestro `src/foundation/core/fs.rs:120-141` | `crates/anti-workspace/src/cas.rs` — sha256 baseline + `.anti.lock` |
-| ✅ Bounded capsule ≤64KB | irina `src/project-state.ts:45` | `crates/anti-core/src/capsule.rs` — truncate at 64KB budget |
-| ✅ Closed enums + exhaustive match | maestro `src/domain/card/schema.rs:117-191` | `ReviewVerdict`, `VerificationStatus` in `work.rs` |
-| ✅ Read-only arbiter (tách executor) | maestro `src/domain/loop_recipes.rs:840-845` | `crates/anti-core/src/arbiter.rs` — rubric scorer, no FS/git |
-| ✅ CLI control plane | — | `crates/anti-cli/` — work submit/review/list/escalations |
-
-**Test coverage:** 25 unit tests (20 core + 2 daemon + 3 workspace), all passing.
-
----
-
 ## What's next
 
 1. **Supervisor agent** — on-demand governance layer with memory notebook and instruction-patching authority.
