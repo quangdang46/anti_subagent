@@ -11,6 +11,29 @@
 **Deploy peers, not subagents.**
 MVP verified: spawn autonomous Claude Code peers via anti-daemon, each in an isolated treehouse worktree. Every peer is a full agent — not a subagent, not a function call. The hierarchy is invisible to peers.
 
+```
+  User                anti-daemon              treehouse-core           Claude Code
+   │                      │                         │                      │
+   │  spawn --task "..."  │                         │                      │
+   ├─────────────────────►│                         │                      │
+   │                      │  acquire_lease()        │                      │
+   │                      ├────────────────────────►│                      │
+   │                      │  ◄── lease + worktree   │                      │
+   │                      │                         │                      │
+   │                      │  spawn subprocess ─────────────────────────────►│
+   │                      │     (cd into worktree)  │                      │
+   │                      │                         │     work on task     │
+   │                      │                         │     write files      │
+   │                      │  ◄── status events ────────────────────────────┤
+   │  ◄── status ────────┤                         │                      │
+   │                      │                         │     complete         │
+   │                      │  ◄── exit ─────────────────────────────────────┤
+   │                      │  reap_children()        │                      │
+   │                      │  mark COMPLETED         │                      │
+   │                      │  release worktree ─────►│                      │
+   │                      │  gc orphans (restart)   │                      │
+```
+
 ---
 
 ## The reason, in one paragraph
