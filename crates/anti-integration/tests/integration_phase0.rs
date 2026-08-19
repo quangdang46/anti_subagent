@@ -39,15 +39,18 @@ fn anti_daemon() -> PathBuf {
 
 /// Helper: kill all anti processes
 fn kill_all() {
-    let _ = Command::new("taskkill").args(["/F", "/IM", "anti-daemon.exe"]).output();
-    let _ = Command::new("taskkill").args(["/F", "/IM", "anti-cli.exe"]).output();
+    let _ = Command::new("taskkill")
+        .args(["/F", "/IM", "anti-daemon.exe"])
+        .output();
+    let _ = Command::new("taskkill")
+        .args(["/F", "/IM", "anti-cli.exe"])
+        .output();
     std::thread::sleep(Duration::from_millis(500));
 }
 
 /// Helper: start daemon
 fn start_daemon() -> bool {
-    let _ = Command::new(anti_daemon())
-        .spawn();
+    let _ = Command::new(anti_daemon()).spawn();
     std::thread::sleep(Duration::from_secs(2));
     true
 }
@@ -81,7 +84,17 @@ fn t1_spawn_peer_normally() {
     kill_all();
     assert!(start_daemon(), "daemon failed to start");
 
-    let (out, code) = run_cli(&["spawn", "--id", "t1-spawn", "--role", "peer", "--harness", "claude", "--repo", "."]);
+    let (out, code) = run_cli(&[
+        "spawn",
+        "--id",
+        "t1-spawn",
+        "--role",
+        "peer",
+        "--harness",
+        "claude",
+        "--repo",
+        ".",
+    ]);
     assert_eq!(code, 0, "spawn failed: {}", out);
     assert!(out.contains("running"), "expected running status: {}", out);
 
@@ -113,7 +126,17 @@ fn t2_terminate_peer_normally() {
     kill_all();
     assert!(start_daemon());
 
-    let (out, _) = run_cli(&["spawn", "--id", "t2-peer", "--role", "peer", "--harness", "claude", "--repo", "."]);
+    let (out, _) = run_cli(&[
+        "spawn",
+        "--id",
+        "t2-peer",
+        "--role",
+        "peer",
+        "--harness",
+        "claude",
+        "--repo",
+        ".",
+    ]);
     let pid: u32 = serde_json::from_str::<serde_json::Value>(&out)
         .ok()
         .and_then(|v| v.get("pid").and_then(|p| p.as_u64().map(|p| p as u32)))
@@ -130,7 +153,11 @@ fn t2_terminate_peer_normally() {
 
     // Verify state
     let (status_out, _) = run_cli(&["status", "t2-peer"]);
-    assert!(status_out.contains("Stopped") || status_out.contains("COMPLETED"), "state should be terminal: {}", status_out);
+    assert!(
+        status_out.contains("Stopped") || status_out.contains("COMPLETED"),
+        "state should be terminal: {}",
+        status_out
+    );
 
     kill_all();
     println!("T2 PASS: terminate peer works, process dead, state updated");
@@ -147,7 +174,17 @@ fn t3_kill_peer_doesnt_kill_lead() {
     let my_pid = std::process::id();
 
     // Spawn a peer
-    let (out, _) = run_cli(&["spawn", "--id", "t3-peer", "--role", "peer", "--harness", "claude", "--repo", "."]);
+    let (out, _) = run_cli(&[
+        "spawn",
+        "--id",
+        "t3-peer",
+        "--role",
+        "peer",
+        "--harness",
+        "claude",
+        "--repo",
+        ".",
+    ]);
     let peer_pid: u32 = serde_json::from_str::<serde_json::Value>(&out)
         .ok()
         .and_then(|v| v.get("pid")?.as_u64().map(|p| p as u32))
@@ -166,11 +203,17 @@ fn t3_kill_peer_doesnt_kill_lead() {
     assert!(!is_process_alive(peer_pid), "peer should be dead");
 
     // Verify current session (lead) is still alive
-    assert!(is_process_alive(my_pid), "current session should still be alive");
+    assert!(
+        is_process_alive(my_pid),
+        "current session should still be alive"
+    );
 
     // Verify daemon is still running
     let (doctor_out, _) = run_cli(&["doctor"]);
-    assert!(doctor_out.contains("daemon: OK"), "daemon should still be running");
+    assert!(
+        doctor_out.contains("daemon: OK"),
+        "daemon should still be running"
+    );
 
     kill_all();
     println!("T3 PASS: kill peer doesn't kill lead, session unaffected");
@@ -184,7 +227,17 @@ fn t4_peer_crash() {
     assert!(start_daemon());
 
     // Spawn a peer
-    let (out, _) = run_cli(&["spawn", "--id", "t4-peer", "--role", "peer", "--harness", "claude", "--repo", "."]);
+    let (out, _) = run_cli(&[
+        "spawn",
+        "--id",
+        "t4-peer",
+        "--role",
+        "peer",
+        "--harness",
+        "claude",
+        "--repo",
+        ".",
+    ]);
     let pid: u32 = serde_json::from_str::<serde_json::Value>(&out)
         .ok()
         .and_then(|v| v.get("pid").and_then(|p| p.as_u64().map(|p| p as u32)))
@@ -192,17 +245,26 @@ fn t4_peer_crash() {
     assert!(pid > 0, "failed to get PID");
 
     // Kill the peer (simulate crash)
-    let _ = Command::new("taskkill").args(["/F", "/PID", &pid.to_string()]).output();
+    let _ = Command::new("taskkill")
+        .args(["/F", "/PID", &pid.to_string()])
+        .output();
     std::thread::sleep(Duration::from_secs(2)); // Wait for reaper
 
     // Verify state is CRASHED
     let (status_out, _) = run_cli(&["status", "t4-peer"]);
-    assert!(status_out.contains("Crashed") || status_out.contains("FAILED"), "state should be crashed/failed: {}", status_out);
+    assert!(
+        status_out.contains("Crashed") || status_out.contains("FAILED"),
+        "state should be crashed/failed: {}",
+        status_out
+    );
 
     // Verify workspace was cleaned up (no worktree left)
     // This is verified by checking the treehouse pool
     let (doctor_out, _) = run_cli(&["doctor"]);
-    assert!(doctor_out.contains("treehouse: OK"), "treehouse should still be OK");
+    assert!(
+        doctor_out.contains("treehouse: OK"),
+        "treehouse should still be OK"
+    );
 
     kill_all();
     println!("T4 PASS: peer crash detected, state updated, treehouse OK");
@@ -216,7 +278,17 @@ fn t5_crash_with_lease() {
     assert!(start_daemon());
 
     // Spawn a peer with workspace
-    let (out, _) = run_cli(&["spawn", "--id", "t5-peer", "--role", "peer", "--harness", "claude", "--repo", "."]);
+    let (out, _) = run_cli(&[
+        "spawn",
+        "--id",
+        "t5-peer",
+        "--role",
+        "peer",
+        "--harness",
+        "claude",
+        "--repo",
+        ".",
+    ]);
     let pid: u32 = serde_json::from_str::<serde_json::Value>(&out)
         .ok()
         .and_then(|v| v.get("pid").and_then(|p| p.as_u64().map(|p| p as u32)))
@@ -226,16 +298,25 @@ fn t5_crash_with_lease() {
     assert!(out.contains("lease_id"), "response should contain lease_id");
 
     // Kill the peer
-    let _ = Command::new("taskkill").args(["/F", "/PID", &pid.to_string()]).output();
+    let _ = Command::new("taskkill")
+        .args(["/F", "/PID", &pid.to_string()])
+        .output();
     std::thread::sleep(Duration::from_secs(2));
 
     // Verify crash detected
     let (status_out, _) = run_cli(&["status", "t5-peer"]);
-    assert!(status_out.contains("Crashed") || status_out.contains("FAILED"), "should be crashed: {}", status_out);
+    assert!(
+        status_out.contains("Crashed") || status_out.contains("FAILED"),
+        "should be crashed: {}",
+        status_out
+    );
 
     // Verify treehouse pool is clean (lease released)
     let (pool_out, _) = run_cli(&["doctor"]);
-    assert!(pool_out.contains("treehouse: OK"), "treehouse should handle cleanup");
+    assert!(
+        pool_out.contains("treehouse: OK"),
+        "treehouse should handle cleanup"
+    );
 
     kill_all();
     println!("T5 PASS: crash with lease — cleanup handled");
@@ -249,14 +330,26 @@ fn t6_crash_recovery_on_restart() {
     assert!(start_daemon());
 
     // Spawn a peer
-    let (out, _) = run_cli(&["spawn", "--id", "t6-peer", "--role", "peer", "--harness", "claude", "--repo", "."]);
+    let (out, _) = run_cli(&[
+        "spawn",
+        "--id",
+        "t6-peer",
+        "--role",
+        "peer",
+        "--harness",
+        "claude",
+        "--repo",
+        ".",
+    ]);
     let pid: u32 = serde_json::from_str::<serde_json::Value>(&out)
         .ok()
         .and_then(|v| v.get("pid").and_then(|p| p.as_u64().map(|p| p as u32)))
         .unwrap_or(0);
 
     // Kill the peer (simulate crash)
-    let _ = Command::new("taskkill").args(["/F", "/PID", &pid.to_string()]).output();
+    let _ = Command::new("taskkill")
+        .args(["/F", "/PID", &pid.to_string()])
+        .output();
     std::thread::sleep(Duration::from_millis(500));
 
     // Kill daemon (simulate daemon crash)
@@ -269,7 +362,9 @@ fn t6_crash_recovery_on_restart() {
     // Verify peer is marked as crashed/recovered
     let (status_out, _) = run_cli(&["status", "t6-peer"]);
     assert!(
-        status_out.contains("Crashed") || status_out.contains("FAILED") || status_out.contains("COMPLETED"),
+        status_out.contains("Crashed")
+            || status_out.contains("FAILED")
+            || status_out.contains("COMPLETED"),
         "peer should be in terminal state after restart: {}",
         status_out
     );
