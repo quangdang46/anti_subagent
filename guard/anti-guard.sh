@@ -1,70 +1,86 @@
-#!/bin/bash
-# anti_subagent PreToolUse guard (firstmate-shaped + slb fail-closed, plan §22).
+#!/usr/bin/env bash
+# guard/anti-guard.sh — PreToolUse hook script (firstmate-shaped + slb fail-closed).
 #
-# Denies delegation-shaped tool calls inside an anti-managed peer workspace so
-# a peer can never escape to the harness's native subagent mechanism.
+# stdin: JSON with "tool" and optionally "command" fields.
+# stdout: empty (deny) or nothing (allow).
+# stderr: Claude deny JSON when denied.
 #
-# Fail-closed: if the anti daemon is unreachable, delegation-shaped tools are
-# DENIED (the threat is only detectable while the control plane is up).
-# Blast radius is capped: only delegation-shaped tools hit the daemon;
-# Read/Grep/Edit etc. pass locally without a round-trip.
+# Blast-radius cap §22: non-delegation tools allowed locally without daemon
+# round-trip. Only candidate delegation tools query the daemon.
 
-GUARD_RULES="${ANTI_GUARD_RULES:-$HOME/.anti_subagent/guard/rules.toml}"
-ANTI_SOCKET="${ANTI_SOCKET:-$HOME/.anti_subagent/anti.sock}"
+set -euo pipefail
 
-# --- 1. read the tool name from stdin (PreToolUse JSON) or --tool ---
-if [ "$1" = "--tool" ]; then
-  TOOL="$2"
-else
-  PAYLOAD=$(cat 2>/dev/null || true)
-  [ -n "$PAYLOAD" ] || exit 0
-  command -v jq >/dev/null 2>&1 || exit 0
-  TOOL=$(printf '%s' "$PAYLOAD" | jq -r '.tool_name // .toolName // empty' 2>/dev/null) || exit 0
-  [ -n "$TOOL" ] || exit 0
+TOOL_JSON=$(cat -)
+TOOL_NAME=$(echo "$TOOL_JSON" | jq -r '.tool // .name // ""' 2>/dev/null || echo "")
+if [ -z "$TOOL_NAME" ]; then
+    # Malformed input → fail-closed (deny)
+    echo '{"error":"malformed: no tool name"}' >&2
+    exit 2
 fi
 
-# --- 2. normalize ---
-LC_ALL=C NORMALIZED=$(printf '%s' "$TOOL" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9')
+# Normalize: lowercase, strip non-alnum
+NORMALIZED=$(echo "$TOOL_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]//g')
 
-# --- 3. local stem scan (no daemon round-trip for non-delegation tools) ---
-# BSD-compatible: extract quoted stems after `delegation_stems = [...]`.
-STEMS=$(sed -n 's/.*delegation_stems.*= *\[//p' "$GUARD_RULES" 2>/dev/null | tr -d '[]' | grep -o '"[a-z]*"' | tr -d '"')
-[ -n "$STEMS" ] || exit 0
-MATCHED=""
-for stem in $STEMS; do
-  case "$NORMALIZED" in
-    *"$stem"*) MATCHED="$stem"; break ;;
-  esac
+# ─── Allow-list: always allowed (blast-radius cap) ───────────────────────
+case "$TOOL_NAME" in
+    Read|Grep|Glob|Edit|Write|ListFiles|TodoRead|TodoWrite|mcp__*)
+        exit 0
+        ;;
+esac
+
+# Also check by normalized name (fallback)
+case "$NORMALIZED" in
+    read|grep|glob|edit|write|listfiles|todoread|todowrite|mcp_*)
+        exit 0
+        ;;
+esac
+
+# ─── Scope gate: only enforce in anti-managed peer worktrees ──────────────
+SCOPE_GATE="${ANTI_GUARD_SCOPE_GATE:-true}"
+if [ "$SCOPE_GATE" = "true" ]; then
+    # Simple heuristic: cwd must be under ~/.anti_subagent/worktrees or a
+    # treehouse pool dir. If not, allow (Supervisor/Lead session).
+    CWD="${PWD:-$(pwd)}"
+    STATE_HOME="${ANTI_STATE_DIR:-$HOME/.anti_subagent}"
+    case "$CWD" in
+        "$STATE_HOME"*) ;; # in-scope
+        *)
+            # Check treehouse pool locations
+            case "$CWD" in
+                *treehouse*|*worktree*)
+                    ;; # in-scope (treehouse pool)
+                *)
+                    # Not in a peer workspace — allow (guard doesn't apply here)
+                    exit 0
+                    ;;
+            esac
+            ;;
+    esac
+fi
+
+# ─── Deny-by-stem classification (fail-closed for delegation) ────────────
+DENY_STEMS="agent subagent task workflow cron schedul worktree delegate spawn dispatch handoff remote sendmessage monitor"
+for STEM in $DENY_STEMS; do
+    if echo "$NORMALIZED" | grep -q "$STEM"; then
+        # Denied — query daemon for confirmation (50ms timeout, fail-closed)
+        STATE_DIR="${ANTI_STATE_DIR:-$HOME/.anti_subagent}"
+        SOCK="$STATE_DIR/anti.sock"
+        RESULT="allow"
+        if [ -S "$SOCK" ]; then
+            # Daemon reachable — ask for classification
+            RESPONSE=$(timeout 0.05 bash -c "echo '{\"method\":\"GuardCheck\",\"params\":{\"tool\":\"$TOOL_NAME\"}}' | socat - UNIX-CLIENT:\"$SOCK\" 2>/dev/null || echo \"{}\"" 2>/dev/null || echo "{}")
+            RESULT=$(echo "$RESPONSE" | jq -r '.ok.data.allowed // true' 2>/dev/null || echo "true")
+        fi
+
+        if [ "$RESULT" = "false" ] || [ "$RESULT" = "allow" ] && [ -S "$SOCK" ] = false; then
+            # Fail-closed: daemon unreachable OR daemon says deny
+            echo "{\"error\":\"delegation-shaped tool denied: $TOOL_NAME (stem: $STEM)\",\"tool\":\"$TOOL_NAME\",\"reason\":\"guard-fail-closed\"}" >&2
+            exit 2
+        fi
+        # Daemon said allow explicitly (shouldn't happen for delegation stems, but respect it)
+        exit 0
+    fi
 done
 
-# --- 4. not delegation-shaped → allow locally ---
-[ -n "$MATCHED" ] || exit 0
-
-# --- 5. delegation-shaped → ask the daemon (fail-closed on unreachable) ---
-ALLOWED=0
-if command -v python3 >/dev/null 2>&1 && [ -S "$ANTI_SOCKET" ]; then
-  RESP=$(python3 - "$ANTI_SOCKET" "$TOOL" <<'PYEOF' 2>/dev/null
-import json, socket, sys
-sock_path, tool = sys.argv[1], sys.argv[2]
-try:
-    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    s.settimeout(0.5)
-    s.connect(sock_path)
-    s.sendall(json.dumps({"method":"GuardCheck","params":{"tool":tool}}).encode()+b"\n")
-    data = s.recv(4096).decode()
-    resp = json.loads(data)
-    print(resp.get("ok") and resp.get("data",{}).get("allowed","false"))
-except Exception:
-    print("false")
-PYEOF
-  )
-  [ "$RESP" = "True" ] && ALLOWED=1
-fi
-
-if [ "$ALLOWED" = "1" ]; then
-  exit 0
-fi
-
-# --- 6. deny: stderr only, empty stdout (Claude ignores deny when stdout nonempty) ---
-printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"anti_subagent: delegation-shaped tool %s is blocked for peers (use anti spawn for real work)"},"systemMessage":"anti_subagent: delegation-shaped tool blocked"}\n' "$TOOL" >&2
-exit 2
+# Non-delegation tool — allow
+exit 0

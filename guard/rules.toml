@@ -1,0 +1,39 @@
+# guard/rules.toml — single source of truth for delegation-shaped stem classification.
+# per-harness install reads from here (anti guard install --harness <provider>).
+
+# Tools that are NEVER allowed in peer sessions (delegation-shaped, deny).
+deny_stems = [
+    "agent",
+    "subagent",
+    "task",
+    "workflow",
+    "cron",
+    "schedul",
+    "worktree",
+    "delegate",
+    "spawn",
+    "dispatch",
+    "handoff",
+    "remote",
+    "sendmessage",
+    "monitor",
+]
+
+# Exact tool names that are ALWAYS allowed (observe/plan tools)
+allow_exact = [
+    "Read",
+    "Grep",
+    "Glob",
+    "Edit",
+    "Write",
+    "ListFiles",
+    "TodoRead",
+    "TodoWrite",
+]
+
+# Prefix patterns that are ALWAYS allowed
+allow_prefixes = ["mcp__"]
+
+# Guard behavior
+fail_closed = true      # daemon unreachable → deny delegation tools
+scope_gate = true       # guard only active in anti-managed peer worktrees
