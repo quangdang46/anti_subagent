@@ -1,6 +1,11 @@
-//! Config hierarchy (slb pattern, plan §5): defaults < user < project < env < flags.
-//! P0 keeps a minimal set — values are read from `~/.anti_subagent/config.toml`
-//! over defaults; env and flags are layered by callers.
+//! Config hierarchy (slb / Paseo pattern, plan §5, §11): defaults < user < project < env < flags.
+//!
+//! Layers in precedence order (each overrides the previous):
+//! 1. Defaults (compiled-in).
+//! 2. User config: `~/.anti_subagent/config.toml`.
+//! 3. Project config: `.anti_subagent.toml` in repo root (or `.anti/config.toml`).
+//! 4. Env vars: `ANTI_*` prefix (e.g. `ANTI_CLaude_BIN`, `ANTI_STALL_TIMEOUT_SECS`).
+//! 5. CLI flags: passed explicitly by callers (layered by call site, not here).
 
 use std::path::PathBuf;
 use thiserror::Error;
@@ -94,36 +99,137 @@ impl Default for Config {
 
 impl Config {
     pub fn load() -> Result<Self, ConfigError> {
+        Self::load_with_project(None)
+    }
+
+    /// Load from all sources, optionally merging a project-local config.
+    pub fn load_with_project(project_root: Option<&std::path::Path>) -> Result<Self, ConfigError> {
         let mut cfg = Config::default();
-        let file = cfg.state_dir.join("config.toml");
-        if file.exists() {
-            let raw = std::fs::read_to_string(&file).map_err(|source| ConfigError::Io {
-                path: file.clone(),
-                source,
-            })?;
-            if let Ok(t) = toml::from_str::<toml::Value>(&raw) {
-                if let Some(v) = t.get("stall_timeout_secs").and_then(|v| v.as_integer()) {
-                    cfg.stall_timeout = std::time::Duration::from_secs(v as u64);
-                }
-                if let Some(v) = t.get("poll_interval_ms").and_then(|v| v.as_integer()) {
-                    cfg.poll_interval = std::time::Duration::from_millis(v as u64);
-                }
-                if let Some(v) = t.get("claude_bin").and_then(|v| v.as_str()) {
-                    cfg.claude_bin = PathBuf::from(v);
-                }
-                if let Some(v) = t.get("ipc_transport").and_then(|v| v.as_str()) {
-                    if let Ok(t) = IpcTransport::from_config(v) {
-                        cfg.ipc_transport = t;
-                    }
+        // User config
+        let user_path = cfg.state_dir.join("config.toml");
+        Self::apply_file(&mut cfg, &user_path)?;
+        // Project config (if a repo root was supplied)
+        if let Some(root) = project_root {
+            Self::apply_file(&mut cfg, &root.join(".anti_subagent.toml"))?;
+            Self::apply_file(&mut cfg, &root.join(".anti/config.toml"))?;
+        } else if let Ok(cwd) = std::env::current_dir() {
+            Self::apply_file(&mut cfg, &cwd.join(".anti_subagent.toml"))?;
+        }
+        // Env vars (override files + defaults)
+        Self::apply_env(&mut cfg);
+        Ok(cfg)
+    }
+
+    fn apply_file(cfg: &mut Config, path: &std::path::Path) -> Result<(), ConfigError> {
+        if !path.exists() {
+            return Ok(());
+        }
+        let raw = std::fs::read_to_string(path).map_err(|source| ConfigError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        // Parse error is not fatal — warn and keep defaults for that file.
+        let t: toml::Value = match toml::from_str(&raw) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!(
+                    "anti: config parse failed for {}: {e} — using defaults for this file",
+                    path.display()
+                );
+                return Ok(());
+            }
+        };
+        Self::merge_table(cfg, &t);
+        Ok(())
+    }
+
+    fn merge_table(cfg: &mut Config, t: &toml::Value) {
+        // Read from top-level first; if a [daemon] section exists, also read from
+        // it (last-writer wins within a key).
+        for key in [
+            "stall_timeout_secs",
+            "poll_interval_ms",
+            "claude_bin",
+            "ipc_transport",
+        ] {
+            if let Some(v) = t.get(key) {
+                apply_key(cfg, key, v);
+            }
+        }
+        if let Some(daemon) = t.get("daemon").and_then(|d| d.as_table()) {
+            for key in [
+                "stall_timeout_secs",
+                "poll_interval_ms",
+                "claude_bin",
+                "ipc_transport",
+            ] {
+                if let Some(v) = daemon.get(key) {
+                    apply_key(cfg, key, v);
                 }
             }
         }
-        // Env var override (highest priority after flags)
+    }
+
+    fn apply_env(cfg: &mut Config) {
+        // Direct anti vars (highest-priority env layer after flags)
+        if let Ok(v) = std::env::var("ANTI_STALL_TIMEOUT_SECS") {
+            if let Ok(n) = v.parse::<u64>() {
+                cfg.stall_timeout = std::time::Duration::from_secs(n);
+            }
+        }
+        if let Ok(v) = std::env::var("ANTI_POLL_INTERVAL_MS") {
+            if let Ok(n) = v.parse::<u64>() {
+                cfg.poll_interval = std::time::Duration::from_millis(n);
+            }
+        }
+        if let Ok(v) = std::env::var("ANTI_CLaude_BIN") {
+            cfg.claude_bin = PathBuf::from(v);
+        }
         if let Ok(v) = std::env::var("ANTI_IPC_TRANSPORT") {
             if let Ok(t) = IpcTransport::from_config(&v) {
                 cfg.ipc_transport = t;
             }
         }
-        Ok(cfg)
+        // Legacy / alias: ANTI_CLAUDE_BIN
+        if let Ok(v) = std::env::var("ANTI_CLAUDE_BIN") {
+            cfg.claude_bin = PathBuf::from(v);
+        }
+        // Paseo-compat: PASEO_LISTEN maps to ipc_transport hint only when
+        // anti var not set (Paseo sets PASEO_LISTEN; we respect it as fallback).
+        if std::env::var("ANTI_IPC_TRANSPORT").is_err() {
+            if let Ok(v) = std::env::var("PASEO_LISTEN") {
+                if let Ok(t) = IpcTransport::from_config(&v) {
+                    cfg.ipc_transport = t;
+                }
+            }
+        }
+    }
+}
+
+fn apply_key(cfg: &mut Config, key: &str, v: &toml::Value) {
+    match key {
+        "stall_timeout_secs" => {
+            if let Some(n) = v.as_integer() {
+                cfg.stall_timeout = std::time::Duration::from_secs(n as u64);
+            }
+        }
+        "poll_interval_ms" => {
+            if let Some(n) = v.as_integer() {
+                cfg.poll_interval = std::time::Duration::from_millis(n as u64);
+            }
+        }
+        "claude_bin" => {
+            if let Some(s) = v.as_str() {
+                cfg.claude_bin = PathBuf::from(s);
+            }
+        }
+        "ipc_transport" => {
+            if let Some(s) = v.as_str() {
+                if let Ok(t) = IpcTransport::from_config(s) {
+                    cfg.ipc_transport = t;
+                }
+            }
+        }
+        _ => {}
     }
 }
