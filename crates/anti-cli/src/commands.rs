@@ -29,10 +29,29 @@ pub fn spawn(
     task: Option<&str>,
     repo: &str,
     parent: Option<&str>,
+    peer_prompt: Option<&std::path::Path>,
+    arm: Option<&str>,
 ) -> Result<String, String> {
     if !daemon_running(state_dir) {
         return Err("daemon not running — start it first with `anti daemon start`".into());
     }
+    // Resolve peer prompt: explicit file > arm default > concealed default
+    let prompt_content = peer_prompt
+        .map(|p| {
+            if !p.exists() {
+                return Err(format!("peer prompt file not found: {}", p.display()));
+            }
+            if p.metadata().map(|m| m.len() > 65536).unwrap_or(true) {
+                return Err(format!(
+                    "peer prompt file too large (>64KB): {}",
+                    p.display()
+                ));
+            }
+            std::fs::read_to_string(p).map_err(|e| format!("cannot read {}: {e}", p.display()))
+        })
+        .or_else(|| arm.map(|a| resolve_arm_prompt(a).map_err(|e| e)))
+        .transpose()?;
+
     let resp = ipc::send_request(
         &socket(state_dir),
         &Request::SpawnAgent {
@@ -43,7 +62,7 @@ pub fn spawn(
             task_path: task.map(str::to_string),
             repo: repo.to_string(),
             parent_id: parent.map(str::to_string),
-            prompt: None,
+            prompt: prompt_content,
         },
     )?;
     check(resp)
@@ -209,89 +228,132 @@ pub fn daemon(state_dir: &PathBuf, action: crate::DaemonAction) -> Result<String
     }
 }
 
-pub fn guard(state_dir: &PathBuf, action: crate::GuardAction) -> Result<String, String> {
-    match action {
-        crate::GuardAction::Test { tool } => {
-            // Local classification — no daemon needed (mirrors the guard script's stem scan).
-            // Local classification (mirrors the guard script's stem scan).
-            let normalized: String = tool
-                .chars()
-                .filter(|c| c.is_ascii_alphanumeric())
-                .flat_map(|c| c.to_lowercase())
-                .collect();
-            let stems = [
-                "agent",
-                "subagent",
-                "task",
-                "workflow",
-                "cron",
-                "schedul",
-                "worktree",
-                "delegate",
-                "spawn",
-                "dispatch",
-                "handoff",
-                "remote",
-                "sendmessage",
-                "monitor",
-            ];
-            let matched = stems.iter().find(|s| normalized.contains(**s));
-            Ok(match matched {
-                Some(s) => format!("deny (delegation-shaped, stem '{s}')"),
-                None => "allow".to_string(),
-            })
-        }
-        crate::GuardAction::Install { workspace } => {
-            let ws = std::path::Path::new(&workspace);
-            if !ws.is_dir() {
-                return Err(format!("workspace does not exist: {workspace}"));
-            }
-            let claude_dir = ws.join(".claude");
-            std::fs::create_dir_all(&claude_dir).map_err(|e| e.to_string())?;
-            let hooks_path = claude_dir.join("hooks.json");
-            let guard_script = std::env::var("HOME")
-                .map(|h| format!("{h}/.anti_subagent/guard/anti-guard.sh"))
-                .unwrap_or_else(|_| "anti-guard.sh".to_string());
-            let existing = if hooks_path.exists() {
-                std::fs::read_to_string(&hooks_path).unwrap_or_else(|_| "{}".to_string())
-            } else {
-                "{}".to_string()
-            };
-            let mut v: serde_json::Value =
-                serde_json::from_str(&existing).map_err(|e| format!("invalid hooks.json: {e}"))?;
-            let hooks = v.as_object_mut().ok_or("hooks.json must be an object")?;
-            hooks.insert(
-                "PreToolUse".to_string(),
-                serde_json::json!([
+fn resolve_arm_prompt(arm: &str) -> Result<String, String> {
+    match arm.to_lowercase().as_str() {
+        "a" | "native" => Ok(
+            "You are a subagent dispatched by the lead via Task. Work on the assigned task area.".to_string(),
+        ),
+        "b" | "flat" => Ok(
+            "You are a peer in a flat full-agent team. Work on the assigned task area and coordinate via workspace notes.".to_string(),
+        ),
+        "c" | "concealed" => Ok(
+            "You are working with a human project owner on this repository. Work independently and challenge material premises.".to_string(),
+        ),
+        "d" | "disclosed" => Ok(
+            "You are a peer in an SLP hierarchy; you report to a Lead. Work on the assigned task area.".to_string(),
+        ),
+        _ => Err(format!("unknown arm '{arm}': use a|b|c|d or native|flat|concealed|disclosed")),
+    }
+}
+
+fn guard_arm_spills_orchestrator(arm: Option<&str>) -> bool {
+    // Only disclosed arms (B, D) may tell peers an orchestrator exists.
+    // Concealed (C) never spills; flat disclosure (B) spells Lesser rigor.
+    matches!(
+        arm.map(|a| a.to_lowercase()).as_deref(),
+        Some("b") | Some("flat") | Some("d") | Some("disclosed")
+    )
+}
+
+pub fn guard_install(
+    state_dir: &PathBuf,
+    workspace: &str,
+    arm: Option<&str>,
+) -> Result<String, String> {
+    if let Some(a) = arm {
+        resolve_arm_prompt(a)?; // validate arm
+    }
+    let ws = std::path::Path::new(workspace);
+    if !ws.is_dir() {
+        return Err(format!("workspace does not exist: {workspace}"));
+    }
+    let claude_dir = ws.join(".claude");
+    std::fs::create_dir_all(&claude_dir).map_err(|e| e.to_string())?;
+    let hooks_path = claude_dir.join("hooks.json");
+    let guard_script = std::env::var("HOME")
+        .map(|h| format!("{h}/.anti_subagent/guard/anti-guard.sh"))
+        .unwrap_or_else(|_| "anti-guard.sh".to_string());
+    let guard_annotation = if guard_arm_spills_orchestrator(arm) {
+        // Disclosed arms may document orchestrator exists (for audit)
+        arm.unwrap_or("disclosed")
+    } else {
+        "concealed"
+    };
+    let existing = if hooks_path.exists() {
+        std::fs::read_to_string(&hooks_path).unwrap_or_else(|_| "{}".to_string())
+    } else {
+        "{}".to_string()
+    };
+    let mut v: serde_json::Value =
+        serde_json::from_str(&existing).map_err(|e| format!("invalid hooks.json: {e}"))?;
+    let hooks = v.as_object_mut().ok_or("hooks.json must be an object")?;
+    hooks.insert(
+        "PreToolUse".to_string(),
+        serde_json::json!([
+            {
+                "matcher": ".*",
+                "hooks": [
                     {
-                        "matcher": ".*",
-                        "hooks": [
-                            {
-                                "type": "command",
-                                "command": format!("{guard_script} --claude")
-                            }
-                        ]
+                        "type": "command",
+                        "command": format!("{guard_script} --claude")
                     }
-                ]),
-            );
-            std::fs::write(
-                &hooks_path,
-                serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?,
-            )
-            .map_err(|e| e.to_string())?;
-            Ok(format!("guard installed at {}", hooks_path.display()))
-        }
-        crate::GuardAction::Status => {
-            let sock = socket(state_dir);
-            if sock.exists() && daemon_running(state_dir) {
-                Ok("guard: daemon up — fail-closed active (delegation tools denied)".to_string())
-            } else {
-                Ok(
-                    "guard: daemon DOWN — guard fails closed (delegation tools denied locally)"
-                        .to_string(),
-                )
+                ]
             }
-        }
+        ]),
+    );
+    // Record arm for audit (does not affect peer behavior for concealed).
+    hooks.insert(
+        "_anti_guard_arm".to_string(),
+        serde_json::json!(guard_annotation),
+    );
+    std::fs::write(
+        &hooks_path,
+        serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(format!(
+        "guard installed at {} (arm:{})",
+        hooks_path.display(),
+        guard_annotation
+    ))
+}
+
+pub fn guard_test(_state_dir: &PathBuf, tool: &str) -> Result<String, String> {
+    // Local classification — no daemon needed (mirrors the guard script's stem scan).
+    let normalized: String = tool
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .flat_map(|c| c.to_lowercase())
+        .collect();
+    let stems = [
+        "agent",
+        "subagent",
+        "task",
+        "workflow",
+        "cron",
+        "schedul",
+        "worktree",
+        "delegate",
+        "spawn",
+        "dispatch",
+        "handoff",
+        "remote",
+        "sendmessage",
+        "monitor",
+    ];
+    let matched = stems.iter().find(|s| normalized.contains(**s));
+    Ok(match matched {
+        Some(s) => format!("deny (delegation-shaped, stem '{s}')"),
+        None => "allow".to_string(),
+    })
+}
+
+pub fn guard_status(state_dir: &PathBuf) -> Result<String, String> {
+    let sock = socket(state_dir);
+    if sock.exists() && daemon_running(state_dir) {
+        Ok("guard: daemon up — fail-closed active (delegation tools denied)".to_string())
+    } else {
+        Ok("guard: daemon DOWN — guard fails closed (delegation tools denied locally)".to_string())
     }
 }
 

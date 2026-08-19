@@ -45,6 +45,12 @@ enum Commands {
         /// Parent agent id (lead of this peer)
         #[arg(long)]
         parent: Option<String>,
+        /// Peer prompt file (concealment toggle: plan §34)
+        #[arg(long)]
+        peer_prompt: Option<PathBuf>,
+        /// Benchmark arm: a|b|c|d (concealment is a runtime variable)
+        #[arg(long)]
+        arm: Option<String>,
     },
     /// List agents
     List {
@@ -147,6 +153,9 @@ enum GuardAction {
         /// Workspace (worktree) path to install into
         #[arg(long)]
         workspace: String,
+        /// Benchmark arm for guard config parameterization
+        #[arg(long)]
+        arm: Option<String>,
     },
     /// Classify a tool name (allow/deny) without installing
     Test {
@@ -181,6 +190,8 @@ fn main() {
             task,
             repo,
             parent,
+            peer_prompt,
+            arm,
         } => commands::spawn(
             &state_dir,
             &id,
@@ -190,6 +201,8 @@ fn main() {
             task.as_deref(),
             &repo,
             parent.as_deref(),
+            peer_prompt.as_deref(),
+            arm.as_deref(),
         ),
         Commands::List { role, status, json } => {
             commands::list(&state_dir, role.as_deref(), status.as_deref(), json)
@@ -200,7 +213,13 @@ fn main() {
         Commands::Kill { id } => commands::stop(&state_dir, &id, true),
         Commands::Restart { id } => commands::restart(&state_dir, &id),
         Commands::Daemon { action } => commands::daemon(&state_dir, action),
-        Commands::Guard { action } => commands::guard(&state_dir, action),
+        Commands::Guard { action } => match action {
+            GuardAction::Install { workspace, arm } => {
+                commands::guard_install(&state_dir, &workspace, arm.as_deref())
+            }
+            GuardAction::Test { tool } => commands::guard_test(&state_dir, &tool),
+            GuardAction::Status => commands::guard_status(&state_dir),
+        },
         Commands::Doctor => commands::doctor(&state_dir),
         Commands::Work { action } => commands::work(&state_dir, action),
         Commands::Escalations => commands::escalations(&state_dir),
