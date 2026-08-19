@@ -183,25 +183,40 @@ fn run_arm(arm: Arm, repo: &str, task: &str) -> RunMetrics {
         Arm::B => {
             // Flat full-agent: independent OS-process peers, disclosed.
             let id = format!("bench-b-{}-{}", idx, short(task));
-            m.task_success = spawn_claude(repo, task, Some(&id), Some(&format!(
-                "You are a peer agent in a flat team working with the project owner. \
+            m.task_success = spawn_claude(
+                repo,
+                task,
+                Some(&id),
+                Some(&format!(
+                    "You are a peer agent in a flat team working with the project owner. \
                  Complete this task independently.\n\nTASK: {task}"
-            )));
+                )),
+            );
         }
         Arm::C => {
             // SLP concealed: independent peer, hierarchy invisible.
             let id = format!("bench-c-{}-{}", idx, short(task));
-            m.task_success = spawn_claude(repo, task, Some(&id), Some(&format!(
-                "You are working with the project owner on this repository. Complete this task.\n\nTASK: {task}"
-            )));
+            m.task_success = spawn_claude(
+                repo,
+                task,
+                Some(&id),
+                Some(&format!(
+                    "You are working with the project owner on this repository. Complete this task.\n\nTASK: {task}"
+                )),
+            );
         }
         Arm::D => {
             // SLP disclosed: same substrate, hierarchy visible.
             let id = format!("bench-d-{}-{}", idx, short(task));
-            m.task_success = spawn_claude(repo, task, Some(&id), Some(&format!(
-                "You are a peer in an SLP hierarchy: a Supervisor monitors, a Lead coordinates. \
+            m.task_success = spawn_claude(
+                repo,
+                task,
+                Some(&id),
+                Some(&format!(
+                    "You are a peer in an SLP hierarchy: a Supervisor monitors, a Lead coordinates. \
                  Complete this task under the Lead's direction.\n\nTASK: {task}"
-            )));
+                )),
+            );
         }
     }
 
@@ -231,7 +246,11 @@ fn run_arm(arm: Arm, repo: &str, task: &str) -> RunMetrics {
                         "WORK_REJECTED" => {
                             m.rejections += 1;
                             // Extract revision bump from payload
-                            if let Some(rev) = e.get("payload").and_then(|p| p.get("revision")).and_then(|r| r.as_u64()) {
+                            if let Some(rev) = e
+                                .get("payload")
+                                .and_then(|p| p.get("revision"))
+                                .and_then(|r| r.as_u64())
+                            {
                                 m.revisions = rev as u32;
                             }
                         }
@@ -253,7 +272,9 @@ fn spawn_claude(repo: &str, task: &str, id: Option<&str>, _prompt_extra: Option<
         .map(|h| PathBuf::from(h).join(".anti_subagent"))
         .unwrap_or_else(|_| PathBuf::from("."));
     let sock = anti_daemon::ipc::socket_path(&state_dir);
-    let agent_id = id.map(str::to_string).unwrap_or_else(|| format!("bench-{}", short(task)));
+    let agent_id = id
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("bench-{}", short(task)));
     let req = Request::SpawnAgent {
         id: agent_id.clone(),
         role: "peer".to_string(),
