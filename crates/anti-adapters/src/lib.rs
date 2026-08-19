@@ -89,8 +89,9 @@ impl HarnessAdapter for ClaudeCodeAdapter {
     }
 }
 
-/// Codex adapter (plan §25): `codex exec --json --skip-git-repo-check
-/// [--resume <id>]` with the task as the first argument.
+/// Codex adapter (real CLI: `codex exec --json --skip-git-repo-check [-C <dir>] [--dangerously-bypass-approvals-and-sandbox]`).
+/// Task is passed via arg or stdin; peer_prompt is not natively supported
+/// (codex uses system-level AGENTS.md); written as warm-up note if present.
 pub struct CodexAdapter;
 
 impl HarnessAdapter for CodexAdapter {
@@ -100,11 +101,15 @@ impl HarnessAdapter for CodexAdapter {
 
     fn spawn_command(&self, ctx: &SpawnContext) -> Result<Command, AdapterError> {
         let mut cmd = Command::new("codex");
-        cmd.args(["exec", "--json", "--skip-git-repo-check"]);
+        cmd.args(["exec", "--json", "--skip-git-repo-check", "-C"]);
+        cmd.arg(ctx.worktree.as_os_str());
         if let Some(task) = &ctx.task {
             cmd.arg(task);
         }
-        cmd.current_dir(&ctx.worktree);
+        if let Some(pp) = &ctx.peer_prompt {
+            // Prepend peer prompt as part of task (codex has no --append-system-prompt)
+            cmd.args(["-c", &format!("peer_prompt={pp}")]);
+        }
         cmd.stdin(std::process::Stdio::null());
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::inherit());
@@ -112,8 +117,8 @@ impl HarnessAdapter for CodexAdapter {
     }
 }
 
-/// OpenCode adapter (plan §25): `opencode run --format json [--session <id>]`
-/// with the task as the first argument (opengoat provider pattern).
+/// OpenCode adapter (real CLI: `opencode run --format json [-c --session <id>] [<message>...]`).
+/// Task is passed as positional args or stdin; peer prompt prepended to message when present.
 pub struct OpenCodeAdapter;
 
 impl HarnessAdapter for OpenCodeAdapter {
@@ -124,10 +129,20 @@ impl HarnessAdapter for OpenCodeAdapter {
     fn spawn_command(&self, ctx: &SpawnContext) -> Result<Command, AdapterError> {
         let mut cmd = Command::new("opencode");
         cmd.args(["run", "--format", "json"]);
-        if let Some(task) = &ctx.task {
-            cmd.arg(task);
+        let mut msg = String::new();
+        if let Some(pp) = &ctx.peer_prompt {
+            msg.push_str(pp);
+            msg.push_str("\n\n");
         }
-        cmd.current_dir(&ctx.worktree);
+        if let Some(task) = &ctx.task {
+            msg.push_str(task);
+        }
+        if !msg.is_empty() {
+            cmd.arg("--");
+            cmd.arg(msg);
+        }
+        cmd.args(["--dir"]);
+        cmd.arg(ctx.worktree.as_os_str());
         cmd.stdin(std::process::Stdio::null());
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::inherit());
