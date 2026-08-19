@@ -1,14 +1,18 @@
 //! CAS write (maestro fs.rs:120-141) — write-if-unchanged + lock marker.
 //! Prevents last-writer-wins between 2 peers editing the same file.
 
-use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum CasError {
     #[error("file changed since baseline (expected sha {expected}, found {found})")]
-    Changed { path: PathBuf, expected: String, found: String },
+    Changed {
+        path: PathBuf,
+        expected: String,
+        found: String,
+    },
     #[error("lock held by {holder}")]
     LockHeld { path: PathBuf, holder: String },
     #[error("io error: {0}")]
@@ -26,7 +30,9 @@ pub fn sha256_of(path: &Path) -> std::io::Result<String> {
 
 /// Baseline = sha256 of file when peer starts editing.
 pub fn read_baseline(path: &Path) -> std::io::Result<Baseline> {
-    Ok(Baseline { sha256: sha256_of(path)? })
+    Ok(Baseline {
+        sha256: sha256_of(path)?,
+    })
 }
 
 /// Write only if file still matches baseline. Otherwise → CasError::Changed.
@@ -49,7 +55,11 @@ pub fn write_if_unchanged(path: &Path, content: &str, base: &Baseline) -> Result
 /// overwrites lock of another peer.
 pub fn acquire_lock(dir: &Path, holder: &str) -> Result<(), CasError> {
     let lock = dir.join(".anti.lock");
-    match std::fs::OpenOptions::new().write(true).create_new(true).open(&lock) {
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&lock)
+    {
         Ok(mut f) => {
             use std::io::Write;
             let _ = f.write_all(holder.as_bytes());
@@ -57,7 +67,10 @@ pub fn acquire_lock(dir: &Path, holder: &str) -> Result<(), CasError> {
         }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
             let holder_now = std::fs::read_to_string(&lock).unwrap_or_default();
-            Err(CasError::LockHeld { path: lock, holder: holder_now })
+            Err(CasError::LockHeld {
+                path: lock,
+                holder: holder_now,
+            })
         }
         Err(e) => Err(CasError::Io(e)),
     }

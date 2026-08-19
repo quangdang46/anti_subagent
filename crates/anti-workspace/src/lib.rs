@@ -8,6 +8,10 @@
 //! verify via `status --json` and treat an absent lease as already-released.
 
 pub mod cas;
+pub mod pool;
+
+// Re-export pool adapter types for convenient access.
+pub use pool::{AntiEnv, AntiPool, AntiPoolError, PoolConfig};
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -43,7 +47,11 @@ impl Treehouse {
         Self { bin }
     }
 
-    fn run(&self, args: &[&str], cwd: &std::path::Path) -> Result<std::process::Output, WorkspaceError> {
+    fn run(
+        &self,
+        args: &[&str],
+        cwd: &std::path::Path,
+    ) -> Result<std::process::Output, WorkspaceError> {
         let out = Command::new(&self.bin)
             .args(args)
             .current_dir(cwd)
@@ -58,10 +66,7 @@ impl Treehouse {
                 bin: self.bin.display().to_string(),
             });
         }
-        let out = self.run(
-            &["get", "--lease", "--lease-holder", holder, "--json"],
-            cwd,
-        )?;
+        let out = self.run(&["get", "--lease", "--lease-holder", holder, "--json"], cwd)?;
         if !out.status.success() {
             return Err(WorkspaceError::GetFailed {
                 code: out.status.code().unwrap_or(-1),
@@ -71,16 +76,22 @@ impl Treehouse {
         let stdout = String::from_utf8_lossy(&out.stdout).to_string();
         let line = stdout.lines().rev().find(|l| l.trim().starts_with('{'));
         let raw = line.unwrap_or(stdout.trim());
-        let v: serde_json::Value = serde_json::from_str(raw)
-            .map_err(|_| WorkspaceError::BadJson { raw: raw.to_string() })?;
-        let path = v
-            .get("path")
-            .and_then(|x| x.as_str())
-            .ok_or_else(|| WorkspaceError::BadJson { raw: raw.to_string() })?;
-        let lease_id = v
-            .get("lease_id")
-            .and_then(|x| x.as_str())
-            .ok_or_else(|| WorkspaceError::BadJson { raw: raw.to_string() })?;
+        let v: serde_json::Value =
+            serde_json::from_str(raw).map_err(|_| WorkspaceError::BadJson {
+                raw: raw.to_string(),
+            })?;
+        let path =
+            v.get("path")
+                .and_then(|x| x.as_str())
+                .ok_or_else(|| WorkspaceError::BadJson {
+                    raw: raw.to_string(),
+                })?;
+        let lease_id =
+            v.get("lease_id")
+                .and_then(|x| x.as_str())
+                .ok_or_else(|| WorkspaceError::BadJson {
+                    raw: raw.to_string(),
+                })?;
         Ok(Lease {
             path: PathBuf::from(path),
             lease_id: lease_id.to_string(),
@@ -90,9 +101,20 @@ impl Treehouse {
 
     /// Release a lease idempotently (plan §19). A precondition failure is
     /// treated as already-released after checking `status`.
-    pub fn release_if_lease(&self, lease_id: &str, worktree_path: &std::path::Path, cwd: &std::path::Path) -> Result<(), WorkspaceError> {
+    pub fn release_if_lease(
+        &self,
+        lease_id: &str,
+        worktree_path: &std::path::Path,
+        cwd: &std::path::Path,
+    ) -> Result<(), WorkspaceError> {
         let out = self.run(
-            &["return", "--force", "--if-lease-id", lease_id, worktree_path.to_str().unwrap_or("")],
+            &[
+                "return",
+                "--force",
+                "--if-lease-id",
+                lease_id,
+                worktree_path.to_str().unwrap_or(""),
+            ],
             cwd,
         )?;
         if out.status.success() {
