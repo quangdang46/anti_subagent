@@ -168,7 +168,12 @@ enum GuardAction {
 
 #[derive(Subcommand)]
 enum DaemonAction {
-    Start,
+    /// Start daemon (background by default; --foreground keeps attached)
+    Start {
+        /// Run in foreground (no detach)
+        #[arg(long)]
+        foreground: bool,
+    },
     Stop,
     Status,
 }

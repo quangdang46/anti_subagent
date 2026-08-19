@@ -165,10 +165,32 @@ pub fn restart(state_dir: &PathBuf, id: &str) -> Result<String, String> {
 }
 
 pub fn daemon(state_dir: &PathBuf, action: crate::DaemonAction) -> Result<String, String> {
+    let pid_file = state_dir.join("daemon.pid");
     match action {
-        crate::DaemonAction::Start => {
+        crate::DaemonAction::Start { foreground } => {
             if daemon_running(state_dir) {
                 return Ok("daemon already running".into());
+            }
+            // Handle stale pidfile (process dead, socket gone): remove it.
+            if pid_file.exists() && !daemon_running(state_dir) {
+                let _ = std::fs::remove_file(&pid_file);
+            }
+            if foreground {
+                // Caller handles foreground execution (usually anti-daemon directly).
+                // From anti CLI with --foreground we just advise direct invocation.
+                let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+                let daemon_bin = exe
+                    .parent()
+                    .map(|p| p.join("anti-daemon"))
+                    .unwrap_or_else(|| PathBuf::from("anti-daemon"));
+                let status = Command::new(&daemon_bin)
+                    .env("ANTI_STATE_DIR", state_dir)
+                    .status()
+                    .map_err(|e| format!("cannot start daemon: {e}"))?;
+                if status.success() {
+                    return Ok("daemon exited (foreground)".into());
+                }
+                return Err("daemon exited with non-zero status".into());
             }
             let exe = std::env::current_exe().map_err(|e| e.to_string())?;
             let daemon_bin = exe
@@ -184,7 +206,13 @@ pub fn daemon(state_dir: &PathBuf, action: crate::DaemonAction) -> Result<String
             // Give the socket a moment to appear.
             for _ in 0..50 {
                 if daemon_running(state_dir) {
-                    return Ok(format!("daemon started (pid {})", child.id()));
+                    // Record pid for status/enforcement (daemon also writes pid)
+                    let _ = std::fs::write(&pid_file, child.id().to_string());
+                    return Ok(format!(
+                        "daemon started (pid {}, transport {})",
+                        child.id(),
+                        anti_core::config::IpcTransport::auto().name()
+                    ));
                 }
                 std::thread::sleep(std::time::Duration::from_millis(100));
             }
@@ -192,7 +220,8 @@ pub fn daemon(state_dir: &PathBuf, action: crate::DaemonAction) -> Result<String
         }
         crate::DaemonAction::Stop => {
             let sock = socket(state_dir);
-            if !sock.exists() {
+            if !sock.exists() && !daemon_running(state_dir) {
+                let _ = std::fs::remove_file(&pid_file);
                 return Ok("daemon not running".into());
             }
             // Send a shutdown request; the daemon's serve loop exits and the
@@ -207,10 +236,18 @@ pub fn daemon(state_dir: &PathBuf, action: crate::DaemonAction) -> Result<String
                     use std::io::Write;
                     let _ = stream.write_all(line.as_bytes());
                 }
+                // Also via IPC abstraction (handles TCP on Windows)
+                let _ = ipc::send_request(&sock, &ipc::Request::Shutdown);
+            }
+            // Windows: shutdown via IPC
+            #[cfg(windows)]
+            {
+                let _ = ipc::send_request(&sock, &ipc::Request::Shutdown);
             }
             // Wait for the socket to disappear.
             for _ in 0..50 {
-                if !sock.exists() {
+                if !sock.exists() && !daemon_running(state_dir) {
+                    let _ = std::fs::remove_file(&pid_file);
                     return Ok("daemon stopped".into());
                 }
                 std::thread::sleep(std::time::Duration::from_millis(100));
@@ -220,7 +257,19 @@ pub fn daemon(state_dir: &PathBuf, action: crate::DaemonAction) -> Result<String
         crate::DaemonAction::Status => {
             let sock = socket(state_dir);
             if sock.exists() && daemon_running(state_dir) {
-                Ok(format!("daemon running (socket {})", sock.display()))
+                let pid_text = std::fs::read_to_string(&pid_file).unwrap_or_else(|_| "?".into());
+                let pid_text = pid_text.trim().to_string();
+                let transport = anti_core::config::IpcTransport::auto().name();
+                Ok(format!(
+                    "daemon running (pid {}, transport {}, socket {})",
+                    if pid_text.is_empty() {
+                        "?".into()
+                    } else {
+                        pid_text
+                    },
+                    transport,
+                    sock.display()
+                ))
             } else {
                 Err("daemon not running".into())
             }
