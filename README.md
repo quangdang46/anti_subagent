@@ -11,28 +11,13 @@
 **Deploy peers, not subagents.**
 MVP verified: spawn autonomous Claude Code peers via anti-daemon, each in an isolated treehouse worktree. Every peer is a full agent — not a subagent, not a function call. The hierarchy is invisible to peers.
 
-```
-  User                anti-daemon              treehouse-core           Claude Code
-   │                      │                         │                      │
-   │  spawn --task "..."  │                         │                      │
-   ├─────────────────────►│                         │                      │
-   │                      │  acquire_lease()        │                      │
-   │                      ├────────────────────────►│                      │
-   │                      │  ◄── lease + worktree   │                      │
-   │                      │                         │                      │
-   │                      │  spawn subprocess ─────────────────────────────►│
-   │                      │     (cd into worktree)  │                      │
-   │                      │                         │     work on task     │
-   │                      │                         │     write files      │
-   │                      │  ◄── status events ────────────────────────────┤
-   │  ◄── status ────────┤                         │                      │
-   │                      │                         │     complete         │
-   │                      │  ◄── exit ─────────────────────────────────────┤
-   │                      │  reap_children()        │                      │
-   │                      │  mark COMPLETED         │                      │
-   │                      │  release worktree ─────►│                      │
-   │                      │  gc orphans (restart)   │                      │
-```
+**How it works:**
+1. User sends `anti-cli spawn --task "..."` to anti-daemon via TCP IPC
+2. anti-daemon acquires a worktree lease from treehouse-core pool
+3. anti-daemon spawns Claude Code as an independent OS process in the worktree
+4. Claude Code works autonomously — writes files, runs commands, completes task
+5. anti-daemon monitors via reaper thread, marks Completed/Crashed on exit
+6. On daemon restart, unified recovery reclaims orphaned worktrees via gc
 
 ---
 
