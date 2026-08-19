@@ -122,6 +122,7 @@ dependencies = [
  "anti-core",
  "anti-workspace",
  "chrono",
+ "fd-lock",
  "libc",
  "rusqlite",
  "serde",

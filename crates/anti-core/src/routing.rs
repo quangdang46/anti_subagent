@@ -151,7 +151,12 @@ mod tests {
     #[test]
     fn proof_auditor_always_heavyweight() {
         let config = ProviderConfig::default();
-        let route = resolve_route(Disposition::ProofAuditor, Complexity::Low, &config, "claude");
+        let route = resolve_route(
+            Disposition::ProofAuditor,
+            Complexity::Low,
+            &config,
+            "claude",
+        );
         assert_eq!(route.capability, CapabilityTier::Heavyweight);
         assert_eq!(route.model, "opus");
     }

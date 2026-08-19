@@ -24,7 +24,10 @@ pub fn render_capsule(input: &CapsuleInput) -> String {
             w.id,
             format!("{:?}", w.state),
             w.revision,
-            w.evidence.as_ref().map(|e| &e.sha256[..8.min(e.sha256.len())]).unwrap_or("-"),
+            w.evidence
+                .as_ref()
+                .map(|e| &e.sha256[..8.min(e.sha256.len())])
+                .unwrap_or("-"),
         ));
     }
     out.push_str("## RECENT EVENTS\n");

@@ -58,7 +58,12 @@ pub struct Event {
 }
 
 impl Event {
-    pub fn new(seq: u64, agent_id: impl Into<String>, type_: EventType, payload: serde_json::Value) -> Self {
+    pub fn new(
+        seq: u64,
+        agent_id: impl Into<String>,
+        type_: EventType,
+        payload: serde_json::Value,
+    ) -> Self {
         Self {
             seq,
             timestamp: Utc::now().to_rfc3339(),

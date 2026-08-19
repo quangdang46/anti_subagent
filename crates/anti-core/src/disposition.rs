@@ -92,11 +92,7 @@ pub fn contract_for(disposition: Disposition) -> DispositionContract {
         },
         Disposition::Architect => DispositionContract {
             name: Disposition::Architect,
-            allowed_tools: vec![
-                "read".into(),
-                "grep".into(),
-                "glob".into(),
-            ],
+            allowed_tools: vec!["read".into(), "grep".into(), "glob".into()],
             denied_tools: vec!["write".into(), "edit".into(), "bash".into()],
             can_approve_own_work: false,
             requires_evidence: false,
@@ -104,12 +100,7 @@ pub fn contract_for(disposition: Disposition) -> DispositionContract {
         },
         Disposition::Reviewer => DispositionContract {
             name: Disposition::Reviewer,
-            allowed_tools: vec![
-                "read".into(),
-                "grep".into(),
-                "glob".into(),
-                "bash".into(),
-            ],
+            allowed_tools: vec!["read".into(), "grep".into(), "glob".into(), "bash".into()],
             denied_tools: vec!["write".into(), "edit".into()],
             can_approve_own_work: false,
             requires_evidence: true,
@@ -117,11 +108,7 @@ pub fn contract_for(disposition: Disposition) -> DispositionContract {
         },
         Disposition::Scout => DispositionContract {
             name: Disposition::Scout,
-            allowed_tools: vec![
-                "read".into(),
-                "grep".into(),
-                "glob".into(),
-            ],
+            allowed_tools: vec!["read".into(), "grep".into(), "glob".into()],
             denied_tools: vec!["write".into(), "edit".into(), "bash".into()],
             can_approve_own_work: false,
             requires_evidence: false,
@@ -129,12 +116,7 @@ pub fn contract_for(disposition: Disposition) -> DispositionContract {
         },
         Disposition::ProofAuditor => DispositionContract {
             name: Disposition::ProofAuditor,
-            allowed_tools: vec![
-                "read".into(),
-                "grep".into(),
-                "glob".into(),
-                "bash".into(),
-            ],
+            allowed_tools: vec!["read".into(), "grep".into(), "glob".into(), "bash".into()],
             denied_tools: vec!["write".into(), "edit".into()],
             can_approve_own_work: false,
             requires_evidence: true,

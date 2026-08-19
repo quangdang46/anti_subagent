@@ -131,7 +131,10 @@ mod tests {
 
     #[test]
     fn fence_error_carries_audit_info() {
-        let e = FenceError::StaleGeneration { expected: 2, actual: 1 };
+        let e = FenceError::StaleGeneration {
+            expected: 2,
+            actual: 1,
+        };
         assert!(e.to_string().contains("stale"));
     }
 }
