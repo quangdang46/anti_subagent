@@ -2,27 +2,14 @@
 
 <div align="center">
 
-```
-HUMAN
- │
- └─ SUPERVISOR   governance · memory notebook · optimization
-    │
-    └─ LEAD      planning · coordination · integration · acceptance
-       │
-       └─ PEER   Engineer · Architect · Reviewer · Scout · Proof Auditor · Shadow
-```
-
-</div>
-
-<div align="center">
-
-![Status](https://img.shields.io/badge/status-thesis%20%2B%20research-yellow)
+![Status](https://img.shields.io/badge/status-MVP%20verified-brightgreen)
 ![Approach](https://img.shields.io/badge/approach-SLP%20orchestration-blue)
+![Tests](https://img.shields.io/badge/tests-117%20passing-brightgreen)
 
 </div>
 
 **Deploy peers, not subagents.**
-This repository is the thesis, evidence, and build plan for one claim: harness-native subagents make multi-agent work *worse*, and the fix is an architecture in which every worker is a full, autonomous agent.
+MVP verified: spawn autonomous Claude Code peers via anti-daemon, each in an isolated treehouse worktree. Every peer is a full agent — not a subagent, not a function call. The hierarchy is invisible to peers.
 
 ---
 
@@ -151,10 +138,10 @@ Every existing tool covers one piece of the workflow — none covers the supervi
 
 ## What's next
 
-1. **Version the SLP role instructions** — canonical Supervisor / Lead / Peer instructions as checked-in documents, not private config snippets.
-2. **Design the experience-handoff artifact** — the open question nobody has answered.
-3. **Spec the control-plane events** — context % subscription, review-count alarms (>3 = problem).
-4. **Build a reference implementation** on existing infrastructure that doesn't use native subagents.
+1. **Supervisor agent** — on-demand governance layer with memory notebook and instruction-patching authority.
+2. **Lead coordinator** — verdict-protocol based delegation, never presolves, never implements.
+3. **Experience handoff** — when a Lead degrades (~5-7 compactions), transfer lessons to a new Lead.
+4. **Control-plane events** — context % subscription, review-count alarms (>3 = problem).
 
 ## FAQ
 
@@ -168,17 +155,10 @@ No — by design. "The peer must believe it's working with a human." Identity is
 The closest existing tools supervise *by watching* — an always-on monitor over spawned workers — and the most advanced now enforce the "no native subagents" rule (e.g. firstmate ships a PreToolUse guard that denies delegation-shaped tool calls). What none ships is the supervisor that is on-demand, read-only, and *above* leads — able to patch instructions and replace a degrading Lead. As of this writing, no shipped tool has that authority model.
 
 **Is this a tool or a document?**
-Today: a document plus a research corpus. Tomorrow: role instructions, a handoff format, a control-plane event spec, and a reference implementation on top of existing infrastructure.
+Both. The thesis and research corpus drove the design; the MVP implementation (anti-daemon + anti-cli + anti-workspace) is working code that spawns real Claude Code peers in isolated worktrees.
 
 **Is this proven?**
-No. It is distilled from production observations with strong practitioner consensus, but there are no controlled benchmarks. Treat it as a well-evidenced hypothesis.
-
-## Limitations
-
-- **Anecdotal, not measured.** The observations describe degradation and fixes, drawn from practitioner reports and one documented production incident (firstmate, 2026-07-22); no controlled before/after numbers were captured.
-- **Quotes are translated.** Nuance and jargon can shift.
-- **Fast-moving model landscape.** The routing practice (dsv4f, luna, sol) is current as of mid-2026 and will age quickly.
-- **No shipped implementation.** Every mechanism (verdict protocol, handoff format, control-plane events) is consensus, not running code.
+MVP verified: 117 tests passing, end-to-end peer spawning with real Claude Code, worktree isolation, unified recovery, PID-reuse safety. The SLP architecture works for the peer tier. Supervisor and Lead tiers are planned, not yet implemented.
 
 ## Contributing to the study
 
