@@ -1,5 +1,18 @@
 //! Harness adapters (plan §25): spawn/stop/status for each coding CLI.
 //! P0-P4: Claude Code. P5: Codex. OpenCode later.
+//!
+//! CLI-first, SDK-sidecar only on capability gap (h9h): Claude uses
+//! `claude -p --input-format stream-json --output-format stream-json` when
+//! supported, with NDJSON -> AgentEvent normalization. One-shot json is the
+//! compatibility fallback. No Node/Python SDK sidecar in this bead.
+
+pub mod capabilities;
+pub mod events;
+pub mod session;
+
+pub use capabilities::CapabilityFlags;
+pub use events::{AgentEvent, ToolCallStatus, Usage, parse_claude_stream_line, parse_claude_value};
+pub use session::{AgentSession, SpawnResult};
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -32,9 +45,10 @@ pub struct SpawnContext {
     pub peer_prompt: Option<String>,
 }
 
-/// Claude Code adapter: `claude -p --output-format json --permission-mode
-/// acceptEdits --dangerously-skip-permissions --append-system-prompt <peer>`
-/// with the task fed via stdin.
+/// Claude Code adapter. CLI-first (h9h):
+/// - Default: `claude -p --input-format stream-json --output-format stream-json --session-id <uuid>`.
+/// - Fallback (binary without stream-json): one-shot `claude -p --output-format json`.
+/// - Peer prompt and task are injected via `--append-system-prompt` and stdin.
 pub struct ClaudeCodeAdapter;
 
 impl HarnessAdapter for ClaudeCodeAdapter {
@@ -43,11 +57,22 @@ impl HarnessAdapter for ClaudeCodeAdapter {
     }
 
     fn spawn_command(&self, ctx: &SpawnContext) -> Result<Command, AdapterError> {
+        // Capability probe: if stream-json is supported, use it.
+        let caps = capabilities::CapabilityFlags::probe("claude", "claude");
+        let use_stream = caps.streaming;
         let mut cmd = Command::new("claude");
+        cmd.arg("-p");
+        if use_stream {
+            cmd.args([
+                "--input-format",
+                "stream-json",
+                "--output-format",
+                "stream-json",
+            ]);
+        } else {
+            cmd.args(["--output-format", "json"]);
+        }
         cmd.args([
-            "-p",
-            "--output-format",
-            "json",
             "--permission-mode",
             "acceptEdits",
             "--dangerously-skip-permissions",
