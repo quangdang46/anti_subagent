@@ -5,6 +5,7 @@
 pub mod bus;
 pub mod handoff;
 pub mod ipc;
+pub mod loop_service;
 pub mod peer_manager;
 pub mod recovery;
 pub mod report;
