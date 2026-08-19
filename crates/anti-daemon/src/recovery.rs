@@ -1,36 +1,51 @@
-//! Restart recovery — daemon restart handles stale sessions.
+//! Unified restart recovery — daemon restart handles stale sessions.
 //!
-//! Recovery algorithm (3 phases):
-//! 1. Agent liveness check: PID alive? spawn_gen match? → mark Crashed if dead
-//! 2. Work item recovery: if assigned peer is Crashed → transition to NeedsRevision
-//! 3. Deferred Treehouse cleanup (outside any lock)
+//! Recovery algorithm (4 phases):
+//! 1. Treehouse gc: reclaim orphaned worktrees (leases, dead owners, missing paths)
+//! 2. Agent liveness: PID alive + start time match → mark Crashed if dead
+//! 3. Work item recovery: if assigned peer is Crashed → transition to NeedsRevision
+//! 4. Queue cleanup: placeholder for future queue-based scheduling
 //!
 //! Key invariant: Recovery is conservative. If unsure, mark for observation.
-//! PID reuse safety: spawn_gen must match for liveness claim.
+//! PID reuse safety: owner_started_at must match for liveness claim.
 
 use crate::store::Store;
 use anti_core::events::EventType;
 use anti_core::model::AgentStatus;
 use anti_core::work::WorkItemState;
+use anti_workspace::Treehouse;
 
-/// Information about a cleaned-up agent (for deferred Treehouse release).
-#[derive(Debug, Clone)]
-pub struct DeferredCleanup {
-    pub id: String,
-    pub lease_id: String,
-    pub path: String,
-}
+/// Run unified recovery on daemon restart.
+///
+/// Phase 1 is treehouse gc (automatic, reclaims orphaned worktrees).
+/// Phases 2-3 reconcile agents and work items in the store.
+pub fn recover_on_restart(store: &mut Store, treehouse: &Treehouse) {
+    // Phase 1: GC orphaned worktrees via treehouse.
+    // This handles expired leases, dead-owner worktrees, and missing paths.
+    // heal_state runs automatically on every pool.lock() acquisition.
+    match treehouse.gc(std::path::Path::new("."), None) {
+        Ok(result) => {
+            if !result.reclaimed.is_empty() {
+                eprintln!(
+                    "[RECOVERY] GC reclaimed {} worktrees ({} bytes)",
+                    result.reclaimed.len(),
+                    result.freed_bytes
+                );
+            }
+        }
+        Err(e) => {
+            eprintln!("[RECOVERY] GC failed (non-fatal): {e}");
+        }
+    }
 
-/// Run recovery on daemon restart. 3 phases, lock discipline preserved.
-pub fn recover_on_restart(store: &mut Store) -> Vec<DeferredCleanup> {
-    // Phase 1: Find dead agents (no Treehouse ops)
+    // Phase 2: Find agents that were Running/Starting/Blocked but whose
+    // processes are dead (PID not alive or start time mismatch).
     let dead_agents = find_dead_agents(store);
 
-    // Phase 2: Work item recovery (with lock, fast SQL only)
-    let work_cleanups = recover_work_items(store, &dead_agents);
+    // Phase 3: Work item recovery (with lock, fast SQL only)
+    recover_work_items(store, &dead_agents);
 
-    // Phase 3: Mark agents as Crashed (with lock)
-    let mut cleanups = Vec::new();
+    // Phase 4: Mark dead agents as Crashed and emit events.
     for rec in &dead_agents {
         let _ = store.mark_exit(&rec.id, false);
         let payload = serde_json::json!({
@@ -48,22 +63,11 @@ pub fn recover_on_restart(store: &mut Store) -> Vec<DeferredCleanup> {
             "[RECOVERY] Marked dead agent {} (pid {:?}, gen {}) as Crashed",
             rec.id, rec.pid, rec.spawn_gen
         );
-
-        if let Some(workspace) = &rec.workspace {
-            cleanups.push(DeferredCleanup {
-                id: rec.id.clone(),
-                lease_id: workspace.lease_id.clone(),
-                path: workspace.path.clone(),
-            });
-        }
     }
-
-    // Merge work-item-initiated cleanups
-    cleanups.extend(work_cleanups);
-    cleanups
 }
 
-/// Phase 1: Find agents that are Running/Starting/Blocked but whose PIDs are dead.
+/// Find agents that appear alive in the store but whose processes are dead.
+/// Uses store.is_agent_alive which checks both PID existence and start time.
 fn find_dead_agents(store: &Store) -> Vec<anti_core::model::AgentRecord> {
     let agents = match store.list_agents() {
         Ok(a) => a,
@@ -78,24 +82,26 @@ fn find_dead_agents(store: &Store) -> Vec<anti_core::model::AgentRecord> {
                 AgentStatus::Running | AgentStatus::Blocked | AgentStatus::Starting
             )
         })
-        .filter(|rec| !is_pid_alive(rec.pid))
+        .filter(|rec| {
+            // Use store's is_agent_alive which checks PID + start time.
+            // Fall back to simple PID check if store method fails.
+            store
+                .is_agent_alive(&rec.id)
+                .unwrap_or_else(|_| is_pid_alive(rec.pid))
+        })
         .collect()
 }
 
-/// Phase 2: Work items assigned to now-dead agents → NeedsRevision.
-fn recover_work_items(
-    store: &mut Store,
-    dead_agents: &[anti_core::model::AgentRecord],
-) -> Vec<DeferredCleanup> {
+/// Work items assigned to now-dead agents → NeedsRevision (or Failed if max revisions exceeded).
+fn recover_work_items(store: &mut Store, dead_agents: &[anti_core::model::AgentRecord]) {
     let dead_ids: std::collections::HashSet<String> =
         dead_agents.iter().map(|a| a.id.clone()).collect();
 
     let all_work = match store.list_work_items(None) {
         Ok(w) => w,
-        Err(_) => return Vec::new(),
+        Err(_) => return,
     };
 
-    let mut cleanups = Vec::new();
     for mut work in all_work {
         if dead_ids.contains(&work.peer_id)
             && matches!(
@@ -129,11 +135,10 @@ fn recover_work_items(
             );
         }
     }
-
-    cleanups
 }
 
 /// Check if a PID is alive. Returns false if pid is None.
+/// Fallback for when store.is_agent_alive is unavailable.
 fn is_pid_alive(pid: Option<u32>) -> bool {
     let pid = match pid {
         Some(p) => p,
@@ -184,8 +189,10 @@ mod tests {
             std::env::temp_dir().join(format!("anti-recovery-test-empty-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let mut store = Store::open(&dir).unwrap();
-        let cleanups = recover_on_restart(&mut store);
-        assert!(cleanups.is_empty());
+        let env = anti_workspace::AntiEnv::new(dir.clone());
+        let treehouse = Treehouse::new(env, anti_workspace::PoolConfig::default());
+        recover_on_restart(&mut store, &treehouse);
+        // Should complete without error on empty store
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

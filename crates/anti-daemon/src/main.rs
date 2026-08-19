@@ -4,6 +4,7 @@ use anti_adapters::{
 use anti_core::events::EventType;
 use anti_core::model::{AgentRecord, AgentStatus, Harness, Role};
 use anti_daemon::ipc::{self, Request, Response};
+use anti_daemon::recovery::recover_on_restart;
 use anti_daemon::store::Store;
 use anti_daemon::wait;
 use anti_workspace::{AntiEnv, PoolConfig, Treehouse};
@@ -86,9 +87,8 @@ fn main() {
     // Shared Treehouse instance — single pool handle across all threads.
     let treehouse = Arc::new(make_treehouse(&state_dir));
 
-    // Reconcile on restart (plan §23): peers whose processes died while the
-    // daemon was down become CRASHED/COMPLETED.
-    reconcile_on_start(&mut store, &treehouse);
+    // Unified recovery: GC orphaned worktrees, mark dead agents, reconcile work items.
+    recover_on_restart(&mut store, &treehouse);
 
     // Track live children so a peer's exit becomes AGENT_COMPLETED/CRASHED.
     let children: HashMap<String, Child> = HashMap::new();
@@ -257,42 +257,6 @@ fn main() {
             }
         }
     });
-    // Lease sweeper: releases treehouse leases of agents that reached a
-    // terminal state. Runs OUTSIDE the state lock (treehouse subprocess can
-    // block), so it never stalls IPC. Treehouse acquire skips leased
-    // worktrees, but without this the pool fills up over many runs.
-    let sweeper_store = store.clone();
-    let treehouse_sweeper = Arc::clone(&treehouse);
-    std::thread::spawn(move || {
-        loop {
-            std::thread::sleep(Duration::from_secs(15));
-            let terminal: Vec<(String, String, String)> = {
-                let s = match sweeper_store.lock() {
-                    Ok(g) => g,
-                    Err(_) => continue,
-                };
-                s.list_agents()
-                    .unwrap_or_default()
-                    .into_iter()
-                    .filter(|a| a.status.is_terminal())
-                    .filter_map(|a| {
-                        a.workspace
-                            .map(|w| (a.id.clone(), w.lease_id.clone(), w.path.clone()))
-                    })
-                    .collect()
-            };
-            for (id, _lease_id, path) in terminal {
-                let _ = treehouse_sweeper.release(
-                    std::path::Path::new(&path),
-                    std::path::Path::new(&path),
-                    None,
-                );
-                if let Ok(s) = sweeper_store.lock() {
-                    let _ = s.clear_workspace(&id);
-                }
-            }
-        }
-    });
     // Review watchdog: scan overdue reviews every 15s.
     // Lesson from veylen: silent lead = stuck indefinitely. Escalate, no auto-accept.
     // INVARIANT: No external/blocking operation while holding store Mutex.
@@ -331,7 +295,6 @@ fn main() {
         }
     });
     let (s2, c2) = (store.clone(), children.clone());
-    let treehouse_dispatch = Arc::clone(&treehouse);
     let dispatch = move |req: Request| -> Response {
         // WaitAgent must NOT hold the state locks while it loops for minutes —
         // that would starve every other request. It polls with short, discrete
@@ -378,17 +341,15 @@ fn main() {
                 std::thread::sleep(Duration::from_millis(100));
             }
         }
-        // CRITICAL: Don't hold locks during treehouse subprocess calls.
-        // reap_children returns deferred cleanups; do_cleanup runs outside lock.
-        let cleanups = {
+        // Reap exited children (marks Completed/Crashed in store).
+        // Orphaned worktrees are reclaimed by gc on next daemon restart.
+        {
             let (mut s, mut c) = match (s2.lock(), c2.lock()) {
                 (Ok(s), Ok(c)) => (s, c),
                 _ => return Response::err("internal", "state lock poisoned"),
             };
-            reap_children(&mut s, &mut c)
-        };
-        // Treehouse cleanup OUTSIDE the lock — no IPC blocking
-        do_cleanup(cleanups, &treehouse_dispatch);
+            reap_children(&mut s, &mut c);
+        }
         // Handle request
         let (mut s, mut c) = match (s2.lock(), c2.lock()) {
             (Ok(s), Ok(c)) => (s, c),
@@ -1036,92 +997,9 @@ fn handle_report_task(
         Err(e) => Response::err("report_error", e.to_string()),
     }
 }
-
-fn reconcile_on_start(store: &mut Store, treehouse: &Treehouse) {
-    // Phase 1: Collect dead agents (no Treehouse ops)
-    let dead_agents: Vec<AgentRecord> = {
-        let agents = match store.list_agents() {
-            Ok(a) => a,
-            Err(_) => return,
-        };
-        agents
-            .into_iter()
-            .filter(|rec| {
-                matches!(
-                    rec.status,
-                    AgentStatus::Running | AgentStatus::Blocked | AgentStatus::Starting
-                )
-            })
-            .filter(|rec| {
-                rec.pid
-                    .map(|pid| {
-                        #[cfg(unix)]
-                        {
-                            std::process::Command::new("kill")
-                                .args(["-0", &pid.to_string()])
-                                .status()
-                                .map(|s| s.success())
-                                .unwrap_or(false)
-                        }
-                        #[cfg(windows)]
-                        {
-                            std::process::Command::new("tasklist")
-                                .args(["/FI", &format!("PID eq {pid}"), "/NH"])
-                                .output()
-                                .map(|o| {
-                                    let stdout = String::from_utf8_lossy(&o.stdout);
-                                    stdout.contains(&pid.to_string())
-                                })
-                                .unwrap_or(false)
-                        }
-                    })
-                    .unwrap_or(false)
-                    == false
-            })
-            .collect()
-    };
-
-    // Phase 2: Treehouse cleanup (no lock held)
-    for rec in &dead_agents {
-        if let Some(workspace) = &rec.workspace {
-            let _ = treehouse.release(
-                std::path::Path::new(&workspace.path),
-                std::path::Path::new("."),
-                None,
-            );
-        }
-    }
-
-    // Phase 3: Commit results (with lock)
-    for rec in &dead_agents {
-        let _ = store.mark_exit(&rec.id, false);
-        let payload = json!({
-            "exit_code": null,
-            "workspace_lease_id": rec.workspace.as_ref().map(|w| &w.lease_id),
-            "workspace_path": rec.workspace.as_ref().map(|w| &w.path),
-            "crash_evidence": {
-                "timestamp": chrono::Utc::now().to_rfc3339(),
-                "reason": "daemon_restart_dead_process",
-            },
-        });
-        let _ = store.append_event(&rec.id, EventType::PeerCrashed, payload);
-        eprintln!(
-            "[RECOVERY] Cleaned up dead agent {} (pid {:?})",
-            rec.id, rec.pid
-        );
-    }
-}
-
 /// Poll children with try_wait; on exit, mark the agent Completed/Crashed.
-/// Work to do after releasing the lock (treehouse cleanup).
-struct DeferredCleanup {
-    id: String,
-    lease_id: String,
-    path: String,
-    exit_code: Option<i32>,
-}
-
-fn reap_children(store: &mut Store, children: &mut HashMap<String, Child>) -> Vec<DeferredCleanup> {
+/// Orphaned worktrees are reclaimed by gc on next daemon restart.
+fn reap_children(store: &mut Store, children: &mut HashMap<String, Child>) {
     let dead: Vec<(String, bool, Option<i32>)> = children
         .iter_mut()
         .filter_map(|(id, child)| {
@@ -1132,7 +1010,6 @@ fn reap_children(store: &mut Store, children: &mut HashMap<String, Child>) -> Ve
             })
         })
         .collect();
-    let mut cleanups = Vec::new();
     for (id, ok, exit_code) in dead {
         children.remove(&id);
         let workspace_lease = store
@@ -1154,30 +1031,7 @@ fn reap_children(store: &mut Store, children: &mut HashMap<String, Child>) -> Ve
                 },
             });
             let _ = store.append_event(&id, EventType::PeerCrashed, payload);
-
-            // Collect for cleanup AFTER lock is released
-            if let Some(lease) = workspace_lease {
-                cleanups.push(DeferredCleanup {
-                    id,
-                    lease_id: lease.lease_id,
-                    path: lease.path,
-                    exit_code,
-                });
-            }
         }
-    }
-    cleanups
-}
-
-/// Perform deferred treehouse cleanup OUTSIDE the lock.
-fn do_cleanup(cleanups: Vec<DeferredCleanup>, treehouse: &Treehouse) {
-    for c in cleanups {
-        let _ = treehouse.release(
-            std::path::Path::new(&c.path),
-            std::path::Path::new("."),
-            None,
-        );
-        eprintln!("[CLEANUP] Released workspace for crashed agent {}", c.id);
     }
 }
 
