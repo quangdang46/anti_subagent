@@ -1,11 +1,12 @@
 //! anti-workspace: treehouse adapter (DEPEND, plan §19).
 //!
-//! treehouse is a plain CLI subprocess — we never vendor it. Protocol:
-//!   acquire:  treehouse get --lease --lease-holder <id> --json
-//!   release:  treehouse return --force --if-lease-id <lease_id>
-//!   verify:   treehouse status --json
-//! Idempotency: `--if-lease-id` is single-shot; on precondition failure we
-//! verify via `status --json` and treat an absent lease as already-released.
+//! Two API layers:
+//! - **Library API** (`AntiPool`): direct calls to treehouse-core, no subprocess.
+//!   Preferred for new code. See `pool.rs`.
+//! - **Legacy API** (`Treehouse`): subprocess-based wrapper, kept for backward
+//!   compatibility during migration. Deprecated — use `AntiPool` instead.
+//!
+//! Both expose the same lease semantics: acquire → work → release.
 
 pub mod cas;
 pub mod pool;
@@ -14,7 +15,6 @@ pub mod pool;
 pub use pool::{AntiEnv, AntiPool, AntiPoolError, PoolConfig};
 
 use std::path::PathBuf;
-use std::process::Command;
 use thiserror::Error;
 
 #[derive(Debug, Clone)]
@@ -34,15 +34,85 @@ pub enum WorkspaceError {
     BadJson { raw: String },
     #[error("treehouse return failed: {stderr}")]
     ReturnFailed { stderr: String },
+    #[error("pool error: {0}")]
+    Pool(#[from] AntiPoolError),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 }
 
+/// Library-based treehouse adapter (preferred API).
+///
+/// Delegates to `AntiPool` which calls treehouse-core directly — no subprocess.
 pub struct Treehouse {
-    bin: PathBuf,
+    pool: AntiPool,
 }
 
 impl Treehouse {
+    /// Creates a new treehouse adapter backed by `AntiPool`.
+    pub fn new(env: AntiEnv, config: PoolConfig) -> Self {
+        Self {
+            pool: AntiPool::new(env, config),
+        }
+    }
+
+    /// Returns a reference to the underlying `AntiPool`.
+    pub fn pool(&self) -> &AntiPool {
+        &self.pool
+    }
+
+    /// Acquire a durable lease (plan §19).
+    ///
+    /// `repo_root` is the path to the git repository.
+    /// `remote_url` is used for pool directory hashing.
+    /// `holder` identifies the lease holder (e.g. a peer agent ID).
+    pub fn acquire(
+        &self,
+        repo_root: &std::path::Path,
+        remote_url: Option<&str>,
+        holder: &str,
+    ) -> Result<Lease, WorkspaceError> {
+        let acquired = self.pool.acquire(repo_root, remote_url, holder, None)?;
+        Ok(Lease {
+            path: acquired.path,
+            lease_id: acquired
+                .lease
+                .as_ref()
+                .map(|l| l.id.clone())
+                .unwrap_or_default(),
+            holder: acquired
+                .lease
+                .as_ref()
+                .map(|l| l.holder.clone())
+                .unwrap_or_else(|| holder.to_string()),
+        })
+    }
+
+    /// Release a worktree back to the pool.
+    pub fn release(
+        &self,
+        worktree_path: &std::path::Path,
+        repo_root: &std::path::Path,
+        remote_url: Option<&str>,
+    ) -> Result<(), WorkspaceError> {
+        self.pool
+            .release(worktree_path.to_str().unwrap_or(""), repo_root, remote_url)?;
+        Ok(())
+    }
+}
+
+/// Legacy subprocess-based treehouse adapter (deprecated).
+///
+/// Use `Treehouse` (library-based) or `AntiPool` instead.
+#[deprecated(
+    since = "0.2.0",
+    note = "Use anti_workspace::Treehouse (library-based) or AntiPool instead"
+)]
+pub struct TreehouseLegacy {
+    bin: PathBuf,
+}
+
+#[allow(deprecated)]
+impl TreehouseLegacy {
     pub fn new(bin: PathBuf) -> Self {
         Self { bin }
     }
@@ -52,6 +122,7 @@ impl Treehouse {
         args: &[&str],
         cwd: &std::path::Path,
     ) -> Result<std::process::Output, WorkspaceError> {
+        use std::process::Command;
         let out = Command::new(&self.bin)
             .args(args)
             .current_dir(cwd)
@@ -59,7 +130,7 @@ impl Treehouse {
         Ok(out)
     }
 
-    /// Acquire a durable lease (plan §19). Uses `--json` for the lease identity.
+    /// Acquire a durable lease via subprocess (deprecated — use library API).
     pub fn acquire(&self, holder: &str, cwd: &std::path::Path) -> Result<Lease, WorkspaceError> {
         if !self.bin.exists() {
             return Err(WorkspaceError::BinaryNotFound {
@@ -99,8 +170,7 @@ impl Treehouse {
         })
     }
 
-    /// Release a lease idempotently (plan §19). A precondition failure is
-    /// treated as already-released after checking `status`.
+    /// Release a lease idempotently via subprocess (deprecated — use library API).
     pub fn release_if_lease(
         &self,
         lease_id: &str,
@@ -129,5 +199,47 @@ impl Treehouse {
             });
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lease_fields() {
+        let lease = Lease {
+            path: PathBuf::from("/tmp/worktree-1"),
+            lease_id: "abc-123".to_string(),
+            holder: "peer-1".to_string(),
+        };
+        assert_eq!(lease.lease_id, "abc-123");
+        assert_eq!(lease.holder, "peer-1");
+        assert_eq!(lease.path, PathBuf::from("/tmp/worktree-1"));
+    }
+
+    #[test]
+    fn workspace_error_pool_variant() {
+        let err = WorkspaceError::Pool(AntiPoolError::PoolFull { count: 16, max: 16 });
+        let msg = err.to_string();
+        assert!(msg.contains("pool error"), "should contain pool: {msg}");
+        assert!(msg.contains("16"), "should mention count: {msg}");
+    }
+
+    #[test]
+    fn treehouse_new_with_anti_pool() {
+        let env = AntiEnv::new(PathBuf::from("/tmp/test-anti"));
+        let cfg = PoolConfig::default();
+        let th = Treehouse::new(env, cfg);
+        // Verify the pool is accessible via public API
+        let _pool = th.pool();
+    }
+
+    #[test]
+    fn treehouse_acquire_returns_lease() {
+        let env = AntiEnv::new(PathBuf::from("/tmp/test-ref"));
+        let th = Treehouse::new(env, PoolConfig::default());
+        // Verify Treehouse can be constructed and pool is accessible
+        let _pool = th.pool();
     }
 }

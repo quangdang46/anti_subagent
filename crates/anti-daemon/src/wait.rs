@@ -39,7 +39,10 @@ pub fn wait_for_status(
         }
 
         if Instant::now() >= deadline {
-            return Err(format!("timeout after {timeout:?} waiting for {id} to reach {until:?} (current: {:?})", rec.status));
+            return Err(format!(
+                "timeout after {timeout:?} waiting for {id} to reach {until:?} (current: {:?})",
+                rec.status
+            ));
         }
         std::thread::sleep(poll_interval);
     }

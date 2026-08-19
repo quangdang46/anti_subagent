@@ -61,7 +61,11 @@ impl EventHandler for RecoveryHandler {
                 "[RECOVERY] Peer {} crashed — workspace cleanup required",
                 event.agent_id
             );
-            if let Some(lease_id) = event.payload.get("workspace_lease_id").and_then(|v| v.as_str()) {
+            if let Some(lease_id) = event
+                .payload
+                .get("workspace_lease_id")
+                .and_then(|v| v.as_str())
+            {
                 eprintln!("[RECOVERY] Lease ID: {}", lease_id);
             }
         }

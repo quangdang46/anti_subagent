@@ -19,7 +19,9 @@ pub const PIPE_PREFIX: &str = "anti-subagent";
 pub enum Request {
     Shutdown,
     Ping,
-    GuardCheck { tool: String },
+    GuardCheck {
+        tool: String,
+    },
     SpawnAgent {
         id: String,
         role: String,
@@ -31,10 +33,21 @@ pub enum Request {
         prompt: Option<String>,
     },
     ListAgents,
-    GetAgent { id: String },
-    WaitAgent { id: String, until: String, timeout_secs: u64 },
-    StopAgent { id: String, force: bool },
-    RestartAgent { id: String },
+    GetAgent {
+        id: String,
+    },
+    WaitAgent {
+        id: String,
+        until: String,
+        timeout_secs: u64,
+    },
+    StopAgent {
+        id: String,
+        force: bool,
+    },
+    RestartAgent {
+        id: String,
+    },
     SubmitWork {
         id: String,
         sha256: String,
@@ -120,7 +133,9 @@ pub fn send_request(socket: &Path, req: &Request) -> Result<Response, String> {
     let mut stream = UnixStream::connect(socket)
         .map_err(|e| format!("cannot connect to daemon at {}: {e}", socket.display()))?;
     let line = serde_json::to_string(req).map_err(|e| e.to_string())?;
-    stream.write_all(line.as_bytes()).map_err(|e| e.to_string())?;
+    stream
+        .write_all(line.as_bytes())
+        .map_err(|e| e.to_string())?;
     stream.write_all(b"\n").map_err(|e| e.to_string())?;
     let mut reader = BufReader::new(stream);
     let mut resp = String::new();
@@ -138,11 +153,17 @@ pub fn send_request(addr: &Path, req: &Request) -> Result<Response, String> {
     let stream = TcpStream::connect(addr_str)
         .map_err(|e| format!("cannot connect to daemon at {addr_str}: {e}"))?;
     // Set read/write timeouts to prevent hanging
-    stream.set_read_timeout(Some(Duration::from_secs(10))).map_err(|e| e.to_string())?;
-    stream.set_write_timeout(Some(Duration::from_secs(10))).map_err(|e| e.to_string())?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .map_err(|e| e.to_string())?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(10)))
+        .map_err(|e| e.to_string())?;
     let mut writer = &stream;
     let line = serde_json::to_string(req).map_err(|e| e.to_string())?;
-    writer.write_all(line.as_bytes()).map_err(|e| e.to_string())?;
+    writer
+        .write_all(line.as_bytes())
+        .map_err(|e| e.to_string())?;
     writer.write_all(b"\n").map_err(|e| e.to_string())?;
     let mut reader = BufReader::new(stream);
     let mut resp = String::new();
@@ -296,7 +317,10 @@ mod tests {
         let p = socket_path(Path::new("/tmp/anti-test"));
         let s = p.to_string_lossy();
         // Unix: contains "anti.sock", Windows: "127.0.0.1:PORT"
-        assert!(s.contains("anti") || s.starts_with("127.0.0.1"), "unexpected path: {s}");
+        assert!(
+            s.contains("anti") || s.starts_with("127.0.0.1"),
+            "unexpected path: {s}"
+        );
     }
 
     #[test]
