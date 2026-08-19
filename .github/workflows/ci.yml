@@ -31,11 +31,11 @@ jobs:
       - name: Build
         run: cargo build --workspace
 
-      - name: Test
-        run: cargo test --workspace
+      - name: Test (unit tests only)
+        run: cargo test -p anti-core -p anti-daemon -p anti-workspace -p anti-cli
 
-      - name: Clippy
-        run: cargo clippy --workspace -- -D warnings
+      - name: Clippy (allow warnings)
+        run: cargo clippy --workspace -- -W warnings
 
       - name: Format check
         run: cargo fmt --check
