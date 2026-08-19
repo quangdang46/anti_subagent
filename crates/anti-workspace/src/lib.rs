@@ -1,12 +1,15 @@
 //! anti-workspace: treehouse adapter (DEPEND, plan §19).
 //!
-//! Two API layers:
-//! - **Library API** (`AntiPool`): direct calls to treehouse-core, no subprocess.
-//!   Preferred for new code. See `pool.rs`.
-//! - **Legacy API** (`Treehouse`): subprocess-based wrapper, kept for backward
-//!   compatibility during migration. Deprecated — use `AntiPool` instead.
+//! Library-based treehouse integration — no subprocess calls.
+//! All workspace operations go through `AntiPool` which wraps treehouse-core.
 //!
-//! Both expose the same lease semantics: acquire → work → release.
+//! Key types:
+//! - `Treehouse` — primary API for acquire/release/gc
+//! - `AntiPool` — lower-level pool wrapper (used by Treehouse)
+//! - `AntiEnv` — environment configuration (state directory)
+//! - `PoolConfig` — pool settings (max trees, lock timeout, gc interval)
+//!
+//! Work lifecycle: acquire → work → release (or gc reclaims orphans).
 
 pub mod cas;
 pub mod pool;
@@ -26,14 +29,6 @@ pub struct Lease {
 
 #[derive(Debug, Error)]
 pub enum WorkspaceError {
-    #[error("treehouse binary not found: {bin}")]
-    BinaryNotFound { bin: String },
-    #[error("treehouse get failed (exit {code}): {stderr}")]
-    GetFailed { code: i32, stderr: String },
-    #[error("treehouse get produced unparseable JSON: {raw}")]
-    BadJson { raw: String },
-    #[error("treehouse return failed: {stderr}")]
-    ReturnFailed { stderr: String },
     #[error("pool error: {0}")]
     Pool(#[from] AntiPoolError),
     #[error("io error: {0}")]
@@ -106,108 +101,6 @@ impl Treehouse {
         remote_url: Option<&str>,
     ) -> Result<pool::GcResult, WorkspaceError> {
         Ok(self.pool.gc(repo_root, remote_url)?)
-    }
-}
-
-/// Legacy subprocess-based treehouse adapter (deprecated).
-///
-/// Use `Treehouse` (library-based) or `AntiPool` instead.
-#[deprecated(
-    since = "0.2.0",
-    note = "Use anti_workspace::Treehouse (library-based) or AntiPool instead"
-)]
-pub struct TreehouseLegacy {
-    bin: PathBuf,
-}
-
-#[allow(deprecated)]
-impl TreehouseLegacy {
-    pub fn new(bin: PathBuf) -> Self {
-        Self { bin }
-    }
-
-    fn run(
-        &self,
-        args: &[&str],
-        cwd: &std::path::Path,
-    ) -> Result<std::process::Output, WorkspaceError> {
-        use std::process::Command;
-        let out = Command::new(&self.bin)
-            .args(args)
-            .current_dir(cwd)
-            .output()?;
-        Ok(out)
-    }
-
-    /// Acquire a durable lease via subprocess (deprecated — use library API).
-    pub fn acquire(&self, holder: &str, cwd: &std::path::Path) -> Result<Lease, WorkspaceError> {
-        if !self.bin.exists() {
-            return Err(WorkspaceError::BinaryNotFound {
-                bin: self.bin.display().to_string(),
-            });
-        }
-        let out = self.run(&["get", "--lease", "--lease-holder", holder, "--json"], cwd)?;
-        if !out.status.success() {
-            return Err(WorkspaceError::GetFailed {
-                code: out.status.code().unwrap_or(-1),
-                stderr: String::from_utf8_lossy(&out.stderr).to_string(),
-            });
-        }
-        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-        let line = stdout.lines().rev().find(|l| l.trim().starts_with('{'));
-        let raw = line.unwrap_or(stdout.trim());
-        let v: serde_json::Value =
-            serde_json::from_str(raw).map_err(|_| WorkspaceError::BadJson {
-                raw: raw.to_string(),
-            })?;
-        let path =
-            v.get("path")
-                .and_then(|x| x.as_str())
-                .ok_or_else(|| WorkspaceError::BadJson {
-                    raw: raw.to_string(),
-                })?;
-        let lease_id =
-            v.get("lease_id")
-                .and_then(|x| x.as_str())
-                .ok_or_else(|| WorkspaceError::BadJson {
-                    raw: raw.to_string(),
-                })?;
-        Ok(Lease {
-            path: PathBuf::from(path),
-            lease_id: lease_id.to_string(),
-            holder: holder.to_string(),
-        })
-    }
-
-    /// Release a lease idempotently via subprocess (deprecated — use library API).
-    pub fn release_if_lease(
-        &self,
-        lease_id: &str,
-        worktree_path: &std::path::Path,
-        cwd: &std::path::Path,
-    ) -> Result<(), WorkspaceError> {
-        let out = self.run(
-            &[
-                "return",
-                "--force",
-                "--if-lease-id",
-                lease_id,
-                worktree_path.to_str().unwrap_or(""),
-            ],
-            cwd,
-        )?;
-        if out.status.success() {
-            return Ok(());
-        }
-        // Idempotent: verify the worktree no longer carries this lease.
-        let st = self.run(&["status", "--json"], cwd)?;
-        let text = String::from_utf8_lossy(&st.stdout).to_string();
-        if text.contains(lease_id) {
-            return Err(WorkspaceError::ReturnFailed {
-                stderr: String::from_utf8_lossy(&out.stderr).to_string(),
-            });
-        }
-        Ok(())
     }
 }
 

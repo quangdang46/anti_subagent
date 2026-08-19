@@ -13,7 +13,6 @@ pub struct Config {
     /// agents legitimately go silent during long tool calls).
     pub stall_timeout: std::time::Duration,
     pub poll_interval: std::time::Duration,
-    pub treehouse_bin: PathBuf,
     pub claude_bin: PathBuf,
 }
 
@@ -35,7 +34,6 @@ impl Default for Config {
             state_dir: base,
             stall_timeout: std::time::Duration::from_secs(60),
             poll_interval: std::time::Duration::from_millis(100),
-            treehouse_bin: PathBuf::from("treehouse"),
             claude_bin: PathBuf::from("claude"),
         }
     }
@@ -56,9 +54,6 @@ impl Config {
                 }
                 if let Some(v) = t.get("poll_interval_ms").and_then(|v| v.as_integer()) {
                     cfg.poll_interval = std::time::Duration::from_millis(v as u64);
-                }
-                if let Some(v) = t.get("treehouse_bin").and_then(|v| v.as_str()) {
-                    cfg.treehouse_bin = PathBuf::from(v);
                 }
                 if let Some(v) = t.get("claude_bin").and_then(|v| v.as_str()) {
                     cfg.claude_bin = PathBuf::from(v);

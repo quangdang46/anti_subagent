@@ -311,7 +311,7 @@ pub fn doctor(state_dir: &PathBuf) -> Result<String, String> {
     lines.push(if treehouse {
         "treehouse: OK".to_string()
     } else {
-        "treehouse: NOT FOUND (install or set config treehouse_bin)".to_string()
+        "treehouse: NOT FOUND (install treehouse-core)".to_string()
     });
 
     let claude = std::process::Command::new("claude")
