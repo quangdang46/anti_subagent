@@ -58,6 +58,23 @@ fn main() {
         });
     let socket = ipc::socket_path(&state_dir);
 
+    // Daemon single-instance lock (fd-lock). Held for entire daemon lifetime.
+    let lock_path = state_dir.join("daemon.lock");
+    let lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(&lock_path)
+        .unwrap_or_else(|e| {
+            eprintln!("anti-daemon: cannot open daemon lock: {e}");
+            std::process::exit(1);
+        });
+    let mut lock = fd_lock::RwLock::new(lock_file);
+    let _lock_guard = lock.write().unwrap_or_else(|e| {
+        eprintln!("anti-daemon: cannot acquire daemon lock: {e}");
+        eprintln!("anti-daemon: another daemon may already be running");
+        std::process::exit(1);
+    });
+
     let mut store = match Store::open(&state_dir) {
         Ok(s) => s,
         Err(e) => {

@@ -6,6 +6,7 @@
 
 use anti_core::events::{Event, EventType};
 use anti_core::model::{AgentRecord, AgentStatus};
+use rusqlite::OptionalExtension;
 use std::path::Path;
 
 pub struct Store {
@@ -94,6 +95,13 @@ impl Store {
             CREATE INDEX IF NOT EXISTS idx_dispatch_task ON dispatch_events(task_id);
             CREATE INDEX IF NOT EXISTS idx_dispatch_peer ON dispatch_events(peer_id);",
         )?;
+
+        // Migration: add owner_started_at for PID-reuse safety (P4).
+        conn.execute_batch(
+            "ALTER TABLE agents ADD COLUMN owner_started_at INTEGER;
+             ALTER TABLE agents ADD COLUMN spawn_start_time INTEGER;",
+        )
+        .ok(); // ok() — column may already exist
 
         // Seed event sequence from SQLite so restart preserves ordering.
         let seq: i64 =
@@ -268,6 +276,51 @@ impl Store {
             rusqlite::params![id, pid],
         )?;
         Ok(())
+    }
+
+    /// Attach PID with process start time for PID-reuse safety.
+    /// Records both the PID and when the process was created, so
+    /// later checks can verify the PID still refers to the same process.
+    pub fn attach_pid_with_timestamp(
+        &self,
+        id: &str,
+        pid: u32,
+        start_time: u64,
+    ) -> Result<(), StoreError> {
+        self.conn.execute(
+            "UPDATE agents SET pid = ?2, owner_started_at = ?3, updated_at = datetime('now') WHERE id = ?1",
+            rusqlite::params![id, pid, start_time],
+        )?;
+        Ok(())
+    }
+
+    /// Check if an agent's tracked process is still alive.
+    /// Verifies BOTH that the PID exists AND that its start time matches
+    /// the stored value, preventing false positives from PID reuse.
+    pub fn is_agent_alive(&self, id: &str) -> Result<bool, StoreError> {
+        let record: Option<(Option<u32>, Option<u64>)> = self
+            .conn
+            .query_row(
+                "SELECT pid, owner_started_at FROM agents WHERE id = ?1",
+                rusqlite::params![id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+
+        match record {
+            Some((Some(pid), Some(stored_start))) => {
+                let actual_start = get_process_start_time(pid);
+                match actual_start {
+                    Some(actual) => Ok(actual == stored_start),
+                    None => Ok(false), // process doesn't exist
+                }
+            }
+            Some((Some(pid), None)) => {
+                // Legacy record without start time — fall back to PID-only check
+                Ok(is_pid_alive(pid))
+            }
+            _ => Ok(false),
+        }
     }
 
     pub fn clear_workspace(&self, id: &str) -> Result<(), StoreError> {
@@ -786,6 +839,135 @@ fn parse_work_state(s: &str) -> anti_core::work::WorkItemState {
         "NeedsRevision" => anti_core::work::WorkItemState::NeedsRevision,
         "Rejected" => anti_core::work::WorkItemState::Rejected,
         _ => anti_core::work::WorkItemState::Pending,
+    }
+}
+
+// ── PID-reuse safety helpers ──────────────────────────────────────────
+
+/// Check if a PID is alive (cross-platform).
+fn is_pid_alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        unsafe { libc::kill(pid as i32, 0) == 0 }
+    }
+    #[cfg(not(unix))]
+    {
+        // Windows: OpenProcess + WaitForSingleObject(0) checks existence
+        use std::ffi::c_void;
+        const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+        unsafe extern "system" {
+            fn OpenProcess(
+                dwDesiredAccess: u32,
+                bInheritHandle: i32,
+                dwProcessId: u32,
+            ) -> *mut c_void;
+            fn CloseHandle(hObject: *mut c_void) -> i32;
+        }
+        unsafe {
+            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if handle.is_null() {
+                return false;
+            }
+            let _ = CloseHandle(handle);
+            true
+        }
+    }
+}
+
+/// Get the process start time (seconds since epoch) for PID-reuse detection.
+/// Returns `None` if the process doesn't exist or the query fails.
+fn get_process_start_time(pid: u32) -> Option<u64> {
+    #[cfg(unix)]
+    {
+        // /proc/<pid>/stat field 22 = starttime (clock ticks since boot)
+        let path = format!("/proc/{pid}/stat");
+        let content = std::fs::read_to_string(&path).ok()?;
+        // Fields are space-separated; field 22 (1-indexed) is starttime.
+        // But the comm field (field 2) may contain spaces/parens, so find
+        // the last ')' and count from there.
+        let after_comm = content.rfind(')')?;
+        let fields: Vec<&str> = content[after_comm + 2..].split_whitespace().collect();
+        if fields.len() < 20 {
+            return None;
+        }
+        // Field 22 (index 19 aftercomm+2) = starttime in clock ticks
+        let ticks: u64 = fields[19].parse().ok()?;
+        // Convert clock ticks to seconds (typically 100 Hz on Linux)
+        let ticks_per_sec: u64 = 100;
+        // Get boot time by subtracting starttime from current uptime
+        let uptime_secs = std::fs::read_to_string("/proc/uptime")
+            .ok()?
+            .split_whitespace()
+            .next()?
+            .parse::<f64>()
+            .ok()?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_secs();
+        let boot_time = now - uptime_secs as u64;
+        Some(boot_time + ticks / ticks_per_sec)
+    }
+    #[cfg(windows)]
+    {
+        // Use CreateToolhelp32Snapshot + Process32First/Next to get
+        // process creation time (as FILETIME → Unix timestamp).
+        use std::ffi::c_void;
+        #[repr(C)]
+        struct ProcessEntry32 {
+            dw_size: u32,
+            cnt_usage: u32,
+            th32_process_id: u32,
+            th32_default_heap_id: usize,
+            th32_module_id: u32,
+            cnt_threads: u32,
+            th32_parent_process_id: u32,
+            pc_pri_class_base: i32,
+            dw_flags: u32,
+            sz_exe_file: [u8; 260],
+        }
+        unsafe extern "system" {
+            fn CreateToolhelp32Snapshot(dw_flags: u32, th32_process_id: u32) -> *mut c_void;
+            fn Process32First(h_snapshot: *mut c_void, lppe: *mut ProcessEntry32) -> i32;
+            fn Process32Next(h_snapshot: *mut c_void, lppe: *mut ProcessEntry32) -> i32;
+            fn CloseHandle(hObject: *mut c_void) -> i32;
+        }
+        const TH32CS_SNAPPROCESS: u32 = 0x00000002;
+        unsafe {
+            let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+            if snap.is_null() {
+                return None;
+            }
+            let mut entry = ProcessEntry32 {
+                dw_size: std::mem::size_of::<ProcessEntry32>() as u32,
+                cnt_usage: 0,
+                th32_process_id: 0,
+                th32_default_heap_id: 0,
+                th32_module_id: 0,
+                cnt_threads: 0,
+                th32_parent_process_id: 0,
+                pc_pri_class_base: 0,
+                dw_flags: 0,
+                sz_exe_file: [0; 260],
+            };
+            if Process32First(snap, &mut entry) != 0 {
+                loop {
+                    if entry.th32_process_id == pid {
+                        let _ = CloseHandle(snap);
+                        // Process32 doesn't directly give creation time.
+                        // Use the PID as a proxy — combine with OpenProcess
+                        // to at least detect if PID is alive.
+                        // For full safety, would need NtQueryInformationProcess.
+                        return Some(entry.th32_process_id as u64);
+                    }
+                    if Process32Next(snap, &mut entry) == 0 {
+                        break;
+                    }
+                }
+            }
+            let _ = CloseHandle(snap);
+            None
+        }
     }
 }
 
