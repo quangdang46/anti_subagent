@@ -4,6 +4,7 @@
 //! that crashes and restarts keeps the same id; replacement is an explicit
 //! governance decision, never an implicit respawn.
 
+use crate::attention::AttentionState;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -104,6 +105,9 @@ pub struct AgentRecord {
     pub last_state_change_seq: u64,
     pub created_at: String,
     pub updated_at: String,
+    /// Attention flag: peers needing supervisor/human triage signal.
+    #[serde(default)]
+    pub attention: AttentionState,
 }
 
 #[cfg(test)]

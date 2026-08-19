@@ -96,6 +96,8 @@ enum Commands {
     },
     /// Show recent review escalations (watchdog events)
     Escalations,
+    /// Acknowledge attention (clear attention flag) (anti ack <id>)
+    Ack { id: String },
     /// Report task status back to the daemon (peer → anti channel)
     Report {
         /// Task/work item ID
@@ -228,6 +230,7 @@ fn main() {
         Commands::Doctor => commands::doctor(&state_dir),
         Commands::Work { action } => commands::work(&state_dir, action),
         Commands::Escalations => commands::escalations(&state_dir),
+        Commands::Ack { id } => commands::ack(&state_dir, &id),
         Commands::Report {
             task,
             status,

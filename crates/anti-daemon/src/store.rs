@@ -52,6 +52,9 @@ impl Store {
                 restart_count INTEGER NOT NULL DEFAULT 0,
                 spawn_gen INTEGER NOT NULL DEFAULT 0,
                 last_state_change_seq INTEGER NOT NULL DEFAULT 0,
+                requires_attention INTEGER NOT NULL DEFAULT 0,
+                attention_reason TEXT,
+                attention_timestamp TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -99,7 +102,10 @@ impl Store {
         // Migration: add owner_started_at for PID-reuse safety (P4).
         conn.execute_batch(
             "ALTER TABLE agents ADD COLUMN owner_started_at INTEGER;
-             ALTER TABLE agents ADD COLUMN spawn_start_time INTEGER;",
+             ALTER TABLE agents ADD COLUMN spawn_start_time INTEGER;
+             ALTER TABLE agents ADD COLUMN requires_attention INTEGER NOT NULL DEFAULT 0;
+             ALTER TABLE agents ADD COLUMN attention_reason TEXT;
+             ALTER TABLE agents ADD COLUMN attention_timestamp TEXT;",
         )
         .ok(); // ok() — column may already exist
 
@@ -126,8 +132,8 @@ impl Store {
         self.conn.execute(
             "INSERT INTO agents (id, role, disposition, harness, parent_id, pid,
                  workspace_lease_id, workspace_path, task_path, status,
-                 restart_count, spawn_gen, last_state_change_seq, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                 restart_count, spawn_gen, last_state_change_seq, requires_attention, attention_reason, attention_timestamp, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
             rusqlite::params![
                 rec.id,
                 format!("{:?}", rec.role).to_lowercase(),
@@ -142,6 +148,9 @@ impl Store {
                 rec.restart_count,
                 rec.spawn_gen,
                 rec.last_state_change_seq,
+                if rec.attention.requires_attention { 1 } else { 0 },
+                rec.attention.reason.map(|r| format!("{r:?}").to_lowercase()),
+                rec.attention.timestamp.clone(),
                 rec.created_at,
                 rec.updated_at,
             ],
@@ -153,7 +162,7 @@ impl Store {
         let mut stmt = self.conn.prepare(
             "SELECT id, role, disposition, harness, parent_id, pid, workspace_lease_id,
                  workspace_path, task_path, status, restart_count, spawn_gen,
-                 last_state_change_seq, created_at, updated_at FROM agents WHERE id = ?1",
+                 last_state_change_seq, requires_attention, attention_reason, attention_timestamp, created_at, updated_at FROM agents WHERE id = ?1",
         )?;
         let mut rows = stmt.query_map([id], |r| {
             Ok(AgentRecord {
@@ -183,8 +192,27 @@ impl Store {
                 restart_count: r.get(10)?,
                 spawn_gen: r.get(11)?,
                 last_state_change_seq: r.get(12)?,
-                created_at: r.get(13)?,
-                updated_at: r.get(14)?,
+                attention: {
+                    let requires: i64 = r.get(13)?;
+                    if requires != 0 {
+                        let reason: Option<String> = r.get(14)?;
+                        let ts: Option<String> = r.get(15)?;
+                        let reason = match reason.as_deref().unwrap_or("finished") {
+                            "error" => Some(anti_core::attention::AttentionReason::Error),
+                            "permission" => Some(anti_core::attention::AttentionReason::Permission),
+                            _ => Some(anti_core::attention::AttentionReason::Finished),
+                        };
+                        anti_core::attention::AttentionState {
+                            requires_attention: true,
+                            reason,
+                            timestamp: ts,
+                        }
+                    } else {
+                        anti_core::attention::AttentionState::none()
+                    }
+                },
+                created_at: r.get(16)?,
+                updated_at: r.get(17)?,
             })
         })?;
         rows.next().transpose().map_err(StoreError::Sqlite)
@@ -194,7 +222,7 @@ impl Store {
         let mut stmt = self.conn.prepare(
             "SELECT id, role, disposition, harness, parent_id, pid, workspace_lease_id,
                  workspace_path, task_path, status, restart_count, spawn_gen,
-                 last_state_change_seq, created_at, updated_at FROM agents",
+                 last_state_change_seq, requires_attention, attention_reason, attention_timestamp, created_at, updated_at FROM agents",
         )?;
         let rows = stmt.query_map([], |r| {
             Ok(AgentRecord {
@@ -224,8 +252,27 @@ impl Store {
                 restart_count: r.get(10)?,
                 spawn_gen: r.get(11)?,
                 last_state_change_seq: r.get(12)?,
-                created_at: r.get(13)?,
-                updated_at: r.get(14)?,
+                attention: {
+                    let requires: i64 = r.get(13)?;
+                    if requires != 0 {
+                        let reason: Option<String> = r.get(14)?;
+                        let ts: Option<String> = r.get(15)?;
+                        let reason = match reason.as_deref().unwrap_or("finished") {
+                            "error" => Some(anti_core::attention::AttentionReason::Error),
+                            "permission" => Some(anti_core::attention::AttentionReason::Permission),
+                            _ => Some(anti_core::attention::AttentionReason::Finished),
+                        };
+                        anti_core::attention::AttentionState {
+                            requires_attention: true,
+                            reason,
+                            timestamp: ts,
+                        }
+                    } else {
+                        anti_core::attention::AttentionState::none()
+                    }
+                },
+                created_at: r.get(16)?,
+                updated_at: r.get(17)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>()
@@ -329,6 +376,90 @@ impl Store {
             rusqlite::params![id],
         )?;
         Ok(())
+    }
+
+    pub fn set_attention(
+        &self,
+        id: &str,
+        reason: anti_core::attention::AttentionReason,
+    ) -> Result<(), StoreError> {
+        let ts = chrono::Utc::now().to_rfc3339();
+        let r = format!("{reason:?}").to_lowercase();
+        self.conn.execute(
+            "UPDATE agents SET requires_attention = 1, attention_reason = ?2, attention_timestamp = ?3, updated_at = datetime('now') WHERE id = ?1",
+            rusqlite::params![id, r, ts],
+        )?;
+        Ok(())
+    }
+
+    pub fn clear_attention(&self, id: &str) -> Result<(), StoreError> {
+        self.conn.execute(
+            "UPDATE agents SET requires_attention = 0, attention_reason = NULL, attention_timestamp = NULL, updated_at = datetime('now') WHERE id = ?1",
+            rusqlite::params![id],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_attention(&self) -> Result<Vec<AgentRecord>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, role, disposition, harness, parent_id, pid, workspace_lease_id,
+                 workspace_path, task_path, status, restart_count, spawn_gen,
+                 last_state_change_seq, requires_attention, attention_reason, attention_timestamp, created_at, updated_at
+             FROM agents WHERE requires_attention = 1 ORDER BY attention_timestamp DESC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(AgentRecord {
+                id: r.get(0)?,
+                role: parse_role(&r.get::<_, String>(1)?),
+                disposition: r
+                    .get::<_, Option<String>>(2)?
+                    .map(|d| parse_disposition(&d)),
+                harness: parse_harness(&r.get::<_, String>(3)?),
+                parent_id: r.get(4)?,
+                pid: r.get(5)?,
+                workspace: {
+                    let lease_id: Option<String> = r.get(6)?;
+                    let path: Option<String> = r.get(7)?;
+                    match (lease_id, path) {
+                        (Some(lease_id), Some(path)) => Some(anti_core::model::WorkspaceLease {
+                            lease_id,
+                            path: path.into(),
+                            holder: String::new(),
+                            generation: 0,
+                        }),
+                        _ => None,
+                    }
+                },
+                task_path: r.get(8)?,
+                status: parse_status(&r.get::<_, String>(9)?),
+                restart_count: r.get(10)?,
+                spawn_gen: r.get(11)?,
+                last_state_change_seq: r.get(12)?,
+                attention: {
+                    let requires: i64 = r.get(13)?;
+                    if requires != 0 {
+                        let reason: Option<String> = r.get(14)?;
+                        let ts: Option<String> = r.get(15)?;
+                        let reason = match reason.as_deref().unwrap_or("finished") {
+                            "error" => Some(anti_core::attention::AttentionReason::Error),
+                            "permission" => Some(anti_core::attention::AttentionReason::Permission),
+                            _ => Some(anti_core::attention::AttentionReason::Finished),
+                        };
+                        anti_core::attention::AttentionState {
+                            requires_attention: true,
+                            reason,
+                            timestamp: ts,
+                        }
+                    } else {
+                        anti_core::attention::AttentionState::none()
+                    }
+                },
+                created_at: r.get(16)?,
+                updated_at: r.get(17)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::Sqlite)
     }
 
     pub fn set_workspace(&self, id: &str, lease_id: &str, path: &str) -> Result<(), StoreError> {

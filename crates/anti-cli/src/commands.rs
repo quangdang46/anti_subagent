@@ -77,6 +77,17 @@ pub fn list(
     if !daemon_running(state_dir) {
         return Err("daemon not running — start it first with `anti daemon start`".into());
     }
+    // Triage queue: `anti list --attention` only shows agents needing supervisor triage.
+    if let Some(s) = status {
+        if s == "attention" || s == "needs_attention" {
+            let resp = ipc::send_request(&socket(state_dir), &Request::ListAttention)?;
+            let v = match resp {
+                Response::Ok(v) => v,
+                Response::Err { code, message } => return Err(format!("{code}: {message}")),
+            };
+            return Ok(serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?);
+        }
+    }
     let resp = ipc::send_request(&socket(state_dir), &Request::ListAgents)?;
     let v = match resp {
         Response::Ok(v) => v,
@@ -523,6 +534,17 @@ pub fn work(state_dir: &PathBuf, action: crate::WorkAction) -> Result<String, St
             Ok(out)
         }
     }
+}
+
+pub fn ack(state_dir: &PathBuf, id: &str) -> Result<String, String> {
+    if !daemon_running(state_dir) {
+        return Err("daemon not running — start it first with `anti daemon start`".into());
+    }
+    let resp = ipc::send_request(
+        &socket(state_dir),
+        &Request::AckAttention { id: id.to_string() },
+    )?;
+    check(resp)
 }
 
 pub fn report(

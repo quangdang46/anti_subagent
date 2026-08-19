@@ -2,6 +2,7 @@
 //! event schema, config. No I/O beyond what callers inject.
 
 pub mod arbiter;
+pub mod attention;
 pub mod authority;
 pub mod capsule;
 pub mod config;

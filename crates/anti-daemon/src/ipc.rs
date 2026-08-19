@@ -90,6 +90,12 @@ pub enum Request {
         prompt: Option<String>,
     },
     ListAgents,
+    /// List only agents requiring attention (supervisor/human triage queue).
+    ListAttention,
+    /// Clear attention flag on one agent (anti ack).
+    AckAttention {
+        id: String,
+    },
     GetAgent {
         id: String,
     },

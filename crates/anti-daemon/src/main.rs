@@ -142,6 +142,18 @@ fn main() {
                 prompt.as_deref(),
                 &treehouse_for_closure,
             ),
+            Request::ListAttention => match store.list_attention() {
+                Ok(agents) => {
+                    // Triage signal: only agents needing supervisor/human attention
+                    // Sorted by timestamp DESC via SQL.
+                    Response::ok(agents)
+                }
+                Err(e) => Response::err("store", e.to_string()),
+            },
+            Request::AckAttention { id } => match store.clear_attention(&id) {
+                Ok(()) => Response::ok(json!({"id": id, "attention": "cleared"})),
+                Err(e) => Response::err("store", e.to_string()),
+            },
             Request::ListAgents => match store.list_agents() {
                 Ok(agents) => Response::ok(agents),
                 Err(e) => Response::err("store", e.to_string()),
@@ -433,6 +445,7 @@ fn spawn_peer(
             last_state_change_seq: 0,
             created_at: now.clone(),
             updated_at: now,
+            attention: anti_core::attention::AttentionState::none(),
         };
         if let Err(e) = s.insert_agent(&rec) {
             return Response::err("duplicate", format!("cannot reserve id {id}: {e}"));
@@ -612,6 +625,7 @@ fn spawn_peer_impl(
         last_state_change_seq: 0,
         created_at: now.clone(),
         updated_at: now,
+        attention: anti_core::attention::AttentionState::none(),
     };
     if let Err(e) = store.insert_agent(&rec) {
         return Response::err("duplicate", format!("cannot reserve id {id}: {e}"));
@@ -1017,9 +1031,18 @@ fn reap_children(store: &mut Store, children: &mut HashMap<String, Child>) {
             .ok()
             .flatten()
             .and_then(|a| a.workspace);
-        let _ = store.mark_exit(&id, ok);
+        let is_ok = ok;
+        let _ = store.mark_exit(&id, is_ok);
+        let _ = store.set_attention(
+            &id,
+            if is_ok {
+                anti_core::attention::AttentionReason::Finished
+            } else {
+                anti_core::attention::AttentionReason::Error
+            },
+        );
 
-        if !ok {
+        if !is_ok {
             let payload = json!({
                 "exit_code": exit_code,
                 "workspace_lease_id": workspace_lease.as_ref().map(|w| &w.lease_id),
@@ -1176,6 +1199,7 @@ fn spawn(
         last_state_change_seq: 0,
         created_at: now.clone(),
         updated_at: now,
+        attention: anti_core::attention::AttentionState::none(),
     };
     if let Err(e) = store.insert_agent(&rec) {
         return Response::err("duplicate", format!("cannot reserve id {id}: {e}"));
