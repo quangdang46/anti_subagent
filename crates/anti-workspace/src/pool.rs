@@ -12,10 +12,12 @@
 //! ```
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use thiserror::Error;
 use treehouse_core::config::TreehouseConfig;
+use treehouse_core::env::TreehouseEnv;
 use treehouse_core::gc::GcOptions;
 pub use treehouse_core::gc::GcResult;
 use treehouse_core::pool::{Acquired, OpenOptions, Pool, PoolError, WorktreeStatus};
@@ -41,6 +43,70 @@ impl AntiEnv {
     /// The directory where treehouse pools are stored.
     pub fn pool_root(&self) -> PathBuf {
         self.state_dir.join("worktrees")
+    }
+}
+
+/// Implement TreehouseEnv so Pool::open_with_env uses our pool_root
+/// instead of DefaultEnv's hardcoded $HOME/.treehouse.
+impl TreehouseEnv for AntiEnv {
+    fn pool_root(&self) -> Option<PathBuf> {
+        Some(self.state_dir.join("worktrees"))
+    }
+
+    fn update_cache_path(&self) -> Option<PathBuf> {
+        Some(self.pool_root().join("update-check.json"))
+    }
+
+    fn user_config_path(&self) -> Option<PathBuf> {
+        None // no user config needed
+    }
+
+    fn read_file(&self, path: &Path) -> std::io::Result<String> {
+        std::fs::read_to_string(path)
+    }
+
+    fn read_bytes(&self, path: &Path) -> std::io::Result<Vec<u8>> {
+        std::fs::read(path)
+    }
+
+    fn write_file(&self, path: &Path, data: &[u8]) -> std::io::Result<()> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::write(path, data)
+    }
+
+    fn ensure_dir(&self, path: &Path) -> std::io::Result<()> {
+        std::fs::create_dir_all(path)
+    }
+
+    fn path_exists(&self, path: &Path) -> bool {
+        path.exists()
+    }
+
+    fn list_dir(&self, path: &Path) -> std::io::Result<Vec<PathBuf>> {
+        std::fs::read_dir(path)
+            .map(|entries| entries.filter_map(|e| e.ok()).map(|e| e.path()).collect())
+    }
+
+    fn file_meta(&self, path: &Path) -> std::io::Result<treehouse_core::env::FileMeta> {
+        let meta = std::fs::metadata(path)?;
+        Ok(treehouse_core::env::FileMeta {
+            size: meta.len(),
+            modified: meta.modified().ok(),
+        })
+    }
+
+    fn env_var(&self, name: &str) -> Option<String> {
+        std::env::var(name).ok()
+    }
+
+    fn env_var_os(&self, name: &str) -> Option<PathBuf> {
+        std::env::var_os(name).map(PathBuf::from)
+    }
+
+    fn cwd(&self) -> Option<PathBuf> {
+        std::env::current_dir().ok()
     }
 }
 
@@ -99,6 +165,7 @@ impl AntiPool {
     }
 
     /// Opens the underlying treehouse pool for a specific repo.
+    /// Uses Pool::open_with_env() with AntiEnv so pool_root() is respected.
     fn open_pool(&self, repo_root: &Path, remote_url: Option<&str>) -> Result<Pool, AntiPoolError> {
         let treehouse_config = TreehouseConfig {
             max_trees: self.config.max_trees,
@@ -109,7 +176,8 @@ impl AntiPool {
             config: treehouse_config,
             lock_timeout: Duration::from_secs(self.config.lock_timeout_secs),
         };
-        Pool::open(repo_root, remote_url, &opts).map_err(AntiPoolError::Pool)
+        Pool::open_with_env(repo_root, remote_url, &opts, Arc::new(self.env.clone()))
+            .map_err(AntiPoolError::Pool)
     }
 
     /// Acquires a worktree lease.
