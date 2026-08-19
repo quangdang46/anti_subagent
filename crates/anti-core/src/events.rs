@@ -41,6 +41,8 @@ pub enum EventType {
     VerificationStarted,
     VerificationPassed,
     VerificationFailed,
+    PermissionRequested,
+    PermissionResolved,
     WorkspaceAcquired,
     WorkspaceReleased,
     WorkspaceCleaned,

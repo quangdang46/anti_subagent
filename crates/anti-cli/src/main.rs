@@ -98,6 +98,11 @@ enum Commands {
     Escalations,
     /// Acknowledge attention (clear attention flag) (anti ack <id>)
     Ack { id: String },
+    /// Permission requests (anti permission request/list/allow/deny)
+    Permission {
+        #[command(subcommand)]
+        action: PermissionAction,
+    },
     /// Report task status back to the daemon (peer → anti channel)
     Report {
         /// Task/work item ID
@@ -146,6 +151,31 @@ enum WorkAction {
     },
     /// List all work items
     List,
+}
+
+#[derive(Subcommand)]
+enum PermissionAction {
+    /// Request permission for a tool use (peer → daemon)
+    Request {
+        #[arg(long)]
+        peer: String,
+        #[arg(long)]
+        tool: String,
+        #[arg(long, default_value = "{}")]
+        input: String,
+    },
+    /// List pending permission requests
+    List,
+    /// Allow a pending request
+    Allow {
+        #[arg(long)]
+        request_id: String,
+    },
+    /// Deny a pending request
+    Deny {
+        #[arg(long)]
+        request_id: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -231,6 +261,7 @@ fn main() {
         Commands::Work { action } => commands::work(&state_dir, action),
         Commands::Escalations => commands::escalations(&state_dir),
         Commands::Ack { id } => commands::ack(&state_dir, &id),
+        Commands::Permission { action } => commands::permission(&state_dir, &action),
         Commands::Report {
             task,
             status,

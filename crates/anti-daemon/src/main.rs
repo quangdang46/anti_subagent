@@ -104,6 +104,45 @@ fn main() {
             Request::Shutdown => Response::ok(json!({"shutdown": true})),
             Request::Ping => Response::ok(json!({"pong": true})),
             // Guard policy: peers are never allowed to delegate (plan §22).
+            // Permission flow: separate from guard (guard = delegation deny, permission = legitimate tool request)
+            Request::PermissionRequest {
+                peer_id,
+                tool,
+                input,
+            } => {
+                let id = format!("perm-{}", uuid::Uuid::new_v4().to_string().replace('-', ""));
+                let _ = store
+                    .set_attention(&peer_id, anti_core::attention::AttentionReason::Permission);
+                Response::ok(serde_json::json!({
+                    "id": id,
+                    "status": "pending",
+                    "peer_id": peer_id,
+                    "tool": tool,
+                    "note": "permission queued; use 'anti ack <peer_id>' after user decides"
+                }))
+            }
+            Request::PermissionResolve { .. } => {
+                // Resolution is advisory; real resolution happens via adapter stdin
+                // (only when capability.permission == Some(true)). Here we just acknowledge.
+                Response::ok(serde_json::json!({"status": "resolved"}))
+            }
+            Request::PermissionList => {
+                match store.list_attention() {
+                    Ok(agents) => {
+                        // Filter to permission-pending only
+                        let perm: Vec<_> = agents
+                            .iter()
+                            .filter(|a| {
+                                a.attention.reason
+                                    == Some(anti_core::attention::AttentionReason::Permission)
+                            })
+                            .cloned()
+                            .collect();
+                        Response::ok(perm)
+                    }
+                    Err(e) => Response::err("store", e.to_string()),
+                }
+            }
             Request::GuardCheck { tool } => {
                 // Check if tool is delegation-shaped (existing logic)
                 let is_delegation = tool.contains("agent")

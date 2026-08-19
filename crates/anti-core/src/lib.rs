@@ -11,6 +11,7 @@ pub mod disposition;
 pub mod events;
 pub mod loopprev;
 pub mod model;
+pub mod permission;
 pub mod report;
 pub mod routing;
 pub mod statemachine;

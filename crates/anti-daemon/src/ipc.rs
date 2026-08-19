@@ -131,6 +131,17 @@ pub enum Request {
         disposition: String,
         tool: String,
     },
+    // Permission: peer asks permission for a legitimate tool
+    PermissionRequest {
+        peer_id: String,
+        tool: String,
+        input: String,
+    },
+    PermissionResolve {
+        request_id: String,
+        decision: String,
+    },
+    PermissionList,
     /// Peer reports task status. No peer_id — daemon resolves from task ownership.
     ReportTask {
         task_id: String,

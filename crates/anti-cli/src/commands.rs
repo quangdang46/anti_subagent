@@ -547,6 +547,30 @@ pub fn ack(state_dir: &PathBuf, id: &str) -> Result<String, String> {
     check(resp)
 }
 
+pub fn permission(state_dir: &PathBuf, action: &crate::PermissionAction) -> Result<String, String> {
+    if !daemon_running(state_dir) {
+        return Err("daemon not running — start it first with `anti daemon start`".into());
+    }
+    let req = match action {
+        crate::PermissionAction::List => ipc::Request::PermissionList,
+        crate::PermissionAction::Allow { request_id } => ipc::Request::PermissionResolve {
+            request_id: request_id.clone(),
+            decision: "allow".into(),
+        },
+        crate::PermissionAction::Deny { request_id } => ipc::Request::PermissionResolve {
+            request_id: request_id.clone(),
+            decision: "deny".into(),
+        },
+        crate::PermissionAction::Request { peer, tool, input } => ipc::Request::PermissionRequest {
+            peer_id: peer.clone(),
+            tool: tool.clone(),
+            input: input.clone(),
+        },
+    };
+    let resp = ipc::send_request(&socket(state_dir), &req)?;
+    check(resp)
+}
+
 pub fn report(
     state_dir: &PathBuf,
     task_id: &str,
