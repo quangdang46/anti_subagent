@@ -303,6 +303,26 @@ pub fn doctor(state_dir: &PathBuf) -> Result<String, String> {
         "daemon: NOT RUNNING".to_string()
     });
 
+    // IPC transport info
+    let transport = anti_core::config::IpcTransport::auto();
+    let socket = socket(state_dir);
+    let transport_ok = if daemon_running(state_dir) {
+        ipc::send_request(&socket, &Request::Ping).is_ok()
+    } else {
+        false
+    };
+    lines.push(format!(
+        "ipc_transport: {} ({})",
+        transport.name(),
+        if transport_ok {
+            "reachable"
+        } else if daemon_running(state_dir) {
+            "configured but unreachable"
+        } else {
+            "daemon not running"
+        }
+    ));
+
     let treehouse = std::process::Command::new("treehouse")
         .arg("--help")
         .output()

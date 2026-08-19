@@ -1,9 +1,14 @@
 //! Daemon IPC — newline-delimited JSON over platform-native transport.
 //!
-//! Unix:   Unix domain socket
-//! Windows: TCP loopback on 127.0.0.1 (local-only, no firewall needed)
+//! Supported transports (plan §13, §33):
+//! - Unix:   Unix domain socket (default on Linux/macOS)
+//! - TCP:    TCP loopback on 127.0.0.1 (default on Windows; local-only)
+//! - Named Pipe: Windows named pipe (opt-in via config)
 //!
-//! The protocol is identical on both platforms: one JSON line request,
+//! Transport selection is auto-resolved at startup based on platform, with an
+//! optional config override (ANTI_IPC_TRANSPORT env or config.toml key).
+//!
+//! The protocol is identical on all platforms: one JSON line request,
 //! one JSON line response. Only the transport layer differs.
 
 use serde::{Deserialize, Serialize};
@@ -11,6 +16,58 @@ use std::path::{Path, PathBuf};
 
 pub const SOCKET_NAME: &str = "anti.sock";
 pub const PIPE_PREFIX: &str = "anti-subagent";
+pub const TCP_LOOPBACK: &str = "127.0.0.1";
+
+/// IPC transport type — selected at startup, immutable for the daemon's lifetime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IpcTransport {
+    /// Unix domain socket (Linux/macOS default)
+    Unix,
+    /// TCP loopback on 127.0.0.1 (Windows default; stable port from state_dir hash)
+    Tcp,
+    /// Windows named pipe (alternative on Windows)
+    #[cfg(windows)]
+    NamedPipe,
+}
+
+impl IpcTransport {
+    /// Auto-select transport based on platform.
+    pub fn auto() -> Self {
+        #[cfg(unix)]
+        {
+            IpcTransport::Unix
+        }
+        #[cfg(windows)]
+        {
+            IpcTransport::Tcp
+        }
+    }
+
+    /// Resolve from config value string.
+    pub fn from_config(s: &str) -> Result<Self, String> {
+        match s.to_lowercase().as_str() {
+            "unix" | "socket" => Ok(IpcTransport::Unix),
+            "tcp" | "loopback" => Ok(IpcTransport::Tcp),
+            #[cfg(windows)]
+            "named_pipe" | "pipe" => Ok(IpcTransport::NamedPipe),
+            _ => Err(format!(
+                "unknown IPC transport '{s}'. Valid: unix, tcp{}",
+                if cfg!(windows) { ", named_pipe" } else { "" }
+            )),
+        }
+    }
+
+    /// Display name for diagnostics.
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            IpcTransport::Unix => "unix_socket",
+            IpcTransport::Tcp => "tcp_loopback",
+            #[cfg(windows)]
+            IpcTransport::NamedPipe => "named_pipe",
+        }
+    }
+}
 
 // ─── Protocol types ───────────────────────────────────────────────────
 
@@ -101,15 +158,26 @@ impl Response {
 
 // ─── Platform endpoint path ───────────────────────────────────────────
 
+/// Resolve the socket/address path for the default (auto) transport.
 pub fn socket_path(state_dir: &Path) -> PathBuf {
-    #[cfg(unix)]
-    {
-        state_dir.join(SOCKET_NAME)
-    }
-    #[cfg(windows)]
-    {
-        // TCP port derived from state dir hash (127.0.0.1 only)
-        PathBuf::from(format!("127.0.0.1:{}", tcp_port(state_dir)))
+    socket_path_for(IpcTransport::auto(), state_dir)
+}
+
+pub fn socket_path_for(transport: IpcTransport, state_dir: &Path) -> PathBuf {
+    match transport {
+        IpcTransport::Unix => state_dir.join(SOCKET_NAME),
+        IpcTransport::Tcp => {
+            #[cfg(unix)]
+            {
+                state_dir.join(SOCKET_NAME)
+            }
+            #[cfg(windows)]
+            {
+                PathBuf::from(format!("{TCP_LOOPBACK}:{}", tcp_port(state_dir)))
+            }
+        }
+        #[cfg(windows)]
+        IpcTransport::NamedPipe => PathBuf::from(named_pipe_path(state_dir)),
     }
 }
 
@@ -120,8 +188,18 @@ fn tcp_port(state_dir: &Path) -> u16 {
     use std::hash::{Hash, Hasher};
     let mut hasher = DefaultHasher::new();
     state_dir.hash(&mut hasher);
-    // Map to unprivileged port range 49152-65535
     49152 + (hasher.finish() % 16383) as u16
+}
+
+/// Windows named pipe path derived from state_dir.
+#[cfg(windows)]
+fn named_pipe_path(state_dir: &Path) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    state_dir.hash(&mut hasher);
+    let id = hasher.finish() % 100_000;
+    format!("\\\\.\\pipe\\{PIPE_PREFIX}-{id}")
 }
 
 // ─── send_request ─────────────────────────────────────────────────────
