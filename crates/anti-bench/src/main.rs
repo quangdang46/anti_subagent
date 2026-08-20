@@ -1,6 +1,6 @@
 //! anti-bench — the 4-arm benchmark harness (plan §34).
 //!
-//! ARM A: Native Subagent   — Lead + harness-native Task/spawn_agent workers
+//! ARM A: Native Subagent   — harness-native Task tool (NOT plain claude -p)
 //! ARM B: Flat Full-Agent   — Lead + independent OS-process workers, disclosed
 //! ARM C: SLP concealed     — Supervisor → Lead → Peer, invisible hierarchy
 //! ARM D: SLP disclosed     — same SLP substrate, hierarchy visible
@@ -49,16 +49,18 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let repo = args.get(1).cloned().unwrap_or_else(|| ".".to_string());
     let runs_per_arm: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(1);
+    let full_mode = args.iter().any(|a| a == "--full");
 
-    println!("# anti-bench 4-arm (repo={repo}, runs/arm={runs_per_arm})");
+    println!("# anti-bench 4-arm (repo={repo}, runs/arm={runs_per_arm}, full={full_mode})");
     println!();
 
     let mut results: HashMap<Arm, Vec<RunMetrics>> = HashMap::new();
 
+    let task_count = if full_mode { TASKS.len() } else { 1 };
+
     for arm in [Arm::A, Arm::B, Arm::C, Arm::D] {
         println!("## ARM {:?} — {}", arm, arm_name(arm));
-        for task in TASKS.iter().take(1) {
-            // P4: 1 task first as a smoke gate; full 5×5 behind --full
+        for task in TASKS.iter().take(task_count) {
             for run in 0..runs_per_arm {
                 println!("  run {}: task {:?} ...", run + 1, task);
                 let m = run_arm(arm, &repo, task);
@@ -175,10 +177,19 @@ fn run_arm(arm: Arm, repo: &str, task: &str) -> RunMetrics {
     let idx = run_index();
     match arm {
         Arm::A => {
-            // Native subagent: a single harness-native agent (no SLP) —
-            // represented by one plain claude run with the task inline.
+            // Native subagent: harness-native Task tool (NOT plain claude -p).
+            // This isolates 'native subagent vs full agent' variable.
+            // The prompt instructs Claude to use its Task tool for delegation.
             let id = format!("bench-a-{}-{}", idx, short(task));
-            m.task_success = spawn_claude(repo, task, Some(&id), Some(task));
+            m.task_success = spawn_claude(
+                repo,
+                task,
+                Some(&id),
+                Some(&format!(
+                    "You are a lead agent. Delegate this task to a subagent using the Task tool. \
+                     The subagent will complete the work. Monitor and report the result.\n\nTASK: {task}"
+                )),
+            );
         }
         Arm::B => {
             // Flat full-agent: independent OS-process peers, disclosed.
