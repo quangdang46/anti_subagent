@@ -14,7 +14,10 @@ pub mod timeline_projection;
 pub use capabilities::CapabilityFlags;
 pub use events::{AgentEvent, ToolCallStatus, Usage, parse_claude_stream_line, parse_claude_value};
 pub use session::{AgentSession, SpawnResult};
-pub use timeline_projection::{TimelineRow, TimelineItem, ProjectionEntry, project, collapse_tool_lifecycle, merge_assistant_chunks};
+pub use timeline_projection::{
+    ProjectionEntry, TimelineItem, TimelineRow, collapse_tool_lifecycle, merge_assistant_chunks,
+    project,
+};
 
 use std::path::PathBuf;
 use std::process::Command;

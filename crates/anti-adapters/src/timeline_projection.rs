@@ -117,12 +117,18 @@ mod tests {
             TimelineRow {
                 seq: 1,
                 timestamp: "t".into(),
-                item: TimelineItem::ToolCall { call_id: "c1".into(), name: "bash".into() },
+                item: TimelineItem::ToolCall {
+                    call_id: "c1".into(),
+                    name: "bash".into(),
+                },
             },
             TimelineRow {
                 seq: 2,
                 timestamp: "t".into(),
-                item: TimelineItem::ToolCall { call_id: "c1".into(), name: "bash".into() },
+                item: TimelineItem::ToolCall {
+                    call_id: "c1".into(),
+                    name: "bash".into(),
+                },
             },
         ];
         let proj = project(&rows);
@@ -133,8 +139,18 @@ mod tests {
     #[test]
     fn assistant_chunks_merged() {
         let rows = vec![
-            TimelineRow { seq: 1, timestamp: "t".into(), item: TimelineItem::Assistant { text: "hi ".into() } },
-            TimelineRow { seq: 2, timestamp: "t".into(), item: TimelineItem::Assistant { text: "there".into() } },
+            TimelineRow {
+                seq: 1,
+                timestamp: "t".into(),
+                item: TimelineItem::Assistant { text: "hi ".into() },
+            },
+            TimelineRow {
+                seq: 2,
+                timestamp: "t".into(),
+                item: TimelineItem::Assistant {
+                    text: "there".into(),
+                },
+            },
         ];
         let proj = project(&rows);
         assert_eq!(proj.len(), 1);
@@ -148,8 +164,16 @@ mod tests {
     #[test]
     fn non_contiguous_assistant_not_merged() {
         let rows = vec![
-            TimelineRow { seq: 1, timestamp: "t".into(), item: TimelineItem::Assistant { text: "a".into() } },
-            TimelineRow { seq: 3, timestamp: "t".into(), item: TimelineItem::Assistant { text: "b".into() } },
+            TimelineRow {
+                seq: 1,
+                timestamp: "t".into(),
+                item: TimelineItem::Assistant { text: "a".into() },
+            },
+            TimelineRow {
+                seq: 3,
+                timestamp: "t".into(),
+                item: TimelineItem::Assistant { text: "b".into() },
+            },
         ];
         let proj = project(&rows);
         assert_eq!(proj.len(), 2);
