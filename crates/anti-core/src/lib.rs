@@ -18,4 +18,5 @@ pub mod provider;
 pub mod report;
 pub mod routing;
 pub mod statemachine;
+pub mod subagent_tracker;
 pub mod work;
