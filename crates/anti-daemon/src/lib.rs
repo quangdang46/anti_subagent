@@ -5,6 +5,7 @@
 pub mod agent_manager;
 pub mod bus;
 pub mod event_bridge;
+pub mod event_bus;
 pub mod handoff;
 pub mod ipc;
 pub mod loop_service;

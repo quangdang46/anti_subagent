@@ -283,7 +283,9 @@ impl AgentManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anti_core::agent::AgentConfig;
     use anti_core::model::Role;
+    use anti_core::provider::ProviderKind;
 
     fn temp_dir() -> PathBuf {
         let dir = std::env::temp_dir().join(format!("anti-test-{}", uuid::Uuid::new_v4()));
