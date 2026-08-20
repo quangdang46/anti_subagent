@@ -1,6 +1,7 @@
 //! anti-core: pure domain layer — identity model, lifecycle state machine,
 //! event schema, config. No I/O beyond what callers inject.
 
+pub mod agent;
 pub mod arbiter;
 pub mod attention;
 pub mod authority;
