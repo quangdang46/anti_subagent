@@ -7,11 +7,13 @@
 //! compatibility fallback. No Node/Python SDK sidecar in this bead.
 
 pub mod capabilities;
+pub mod claude_session;
 pub mod events;
 pub mod session;
 pub mod timeline_projection;
 
 pub use capabilities::CapabilityFlags;
+pub use claude_session::ClaudeSession;
 pub use events::{AgentEvent, ToolCallStatus, Usage, parse_claude_stream_line, parse_claude_value};
 pub use session::{AgentSession, SpawnResult};
 pub use timeline_projection::{
