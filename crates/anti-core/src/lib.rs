@@ -12,6 +12,7 @@ pub mod events;
 pub mod loopprev;
 pub mod model;
 pub mod permission;
+pub mod provider;
 pub mod report;
 pub mod routing;
 pub mod statemachine;

@@ -7,5 +7,6 @@ members = [
     "crates/anti-workspace",
     "crates/anti-bench",
     "crates/anti-adapters",
+    "crates/anti-providers",
     "crates/anti-integration",
 ]
