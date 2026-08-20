@@ -10,6 +10,7 @@ pub mod config;
 pub mod dispatch;
 pub mod disposition;
 pub mod events;
+pub mod governance;
 pub mod info_filter;
 pub mod loopprev;
 pub mod model;
