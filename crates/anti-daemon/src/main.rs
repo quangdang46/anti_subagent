@@ -93,8 +93,20 @@ fn main() {
     // Track live children so a peer's exit becomes AGENT_COMPLETED/CRASHED.
     let children: HashMap<String, Child> = HashMap::new();
 
+    // Event bridge channels: agent_id → Receiver<BridgedEvent>.
+    // Spawned peers send NDJSON events here; the reaper drains and persists.
+    let bridge_rx: std::sync::Arc<
+        std::sync::Mutex<
+            std::collections::HashMap<
+                String,
+                std::sync::mpsc::Receiver<anti_daemon::event_bridge::BridgedEvent>,
+            >,
+        >,
+    > = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+
     // Clone Arc for the closure (ipc::serve requires 'static).
     let treehouse_for_closure = Arc::clone(&treehouse);
+    let bridge_rx_for_closure = Arc::clone(&bridge_rx);
 
     let handle = move |store: &mut Store,
                        children: &mut HashMap<String, Child>,
@@ -180,6 +192,7 @@ fn main() {
                 parent_id.as_deref(),
                 prompt.as_deref(),
                 &treehouse_for_closure,
+                &bridge_rx_for_closure,
             ),
             Request::ListAttention => match store.list_attention() {
                 Ok(agents) => {
@@ -299,11 +312,33 @@ fn main() {
     let store = std::sync::Arc::new(std::sync::Mutex::new(store));
     let children = std::sync::Arc::new(std::sync::Mutex::new(children));
     // Reaper uses try_lock so it can never block or deadlock the IPC loop.
-    let (rs, rc) = (store.clone(), children.clone());
+    let (rs, rc, rb) = (store.clone(), children.clone(), bridge_rx.clone());
     std::thread::spawn(move || {
         loop {
             std::thread::sleep(Duration::from_secs(5));
-            if let (Ok(mut s), Ok(mut c)) = (rs.try_lock(), rc.try_lock()) {
+            if let (Ok(mut s), Ok(mut c), Ok(mut b)) = (rs.try_lock(), rc.try_lock(), rb.try_lock())
+            {
+                // Drain event bridge channels and persist as lifecycle events.
+                for (agent_id, rx) in b.iter() {
+                    for bridged in anti_daemon::event_bridge::EventBridge::drain(rx) {
+                        use anti_core::events::EventType;
+                        let event_type = match &bridged.event {
+                            anti_adapters::AgentEvent::TurnCompleted { .. } => {
+                                EventType::AgentCompleted
+                            }
+                            anti_adapters::AgentEvent::TurnFailed { .. } => EventType::AgentFailed,
+                            anti_adapters::AgentEvent::PermissionRequested { .. } => {
+                                EventType::AgentProgress
+                            }
+                            _ => EventType::AgentStarted,
+                        };
+                        let payload = serde_json::json!({
+                            "kind": format!("{:?}", bridged.event),
+                            "provider_event": true,
+                        });
+                        let _ = s.append_event(&bridged.agent_id, event_type, payload);
+                    }
+                }
                 reap_children(&mut s, &mut c);
             }
         }
@@ -345,7 +380,7 @@ fn main() {
             }
         }
     });
-    let (s2, c2) = (store.clone(), children.clone());
+    let (s2, c2, b2) = (store.clone(), children.clone(), bridge_rx.clone());
     let dispatch = move |req: Request| -> Response {
         // WaitAgent must NOT hold the state locks while it loops for minutes —
         // that would starve every other request. It polls with short, discrete
@@ -699,17 +734,6 @@ fn spawn_peer_impl(
     let _ = store.set_workspace(id, &worktree.lease_id, &worktree.path.display().to_string());
 
     // 5-6. spawn the harness non-interactively inside the leased worktree
-    let log_path = std::env::var("HOME")
-        .map(|h| PathBuf::from(h).join(".anti_subagent/logs"))
-        .unwrap_or_else(|_| PathBuf::from("/tmp/anti_logs"));
-    std::fs::create_dir_all(&log_path).ok();
-    let log_file = log_path.join(format!("{id}.log"));
-    // Truncate previous session log (see restart_agent).
-    let _ = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .open(&log_file);
     let peer_prompt = prompt.unwrap_or(
         "You are a peer working on this repository with the project owner. Work independently.",
     );
@@ -731,19 +755,9 @@ fn spawn_peer_impl(
             return Response::err("spawn", e.to_string());
         }
     };
-    cmd.stdout(std::process::Stdio::from(
-        std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_file)
-            .unwrap_or_else(|_| {
-                std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open("/dev/null")
-                    .unwrap()
-            }),
-    ));
+    // Pipe stdout for NDJSON event reading (event_bridge) instead of
+    // redirecting to log file. Stderr stays inherited for debug output.
+    cmd.stdout(std::process::Stdio::piped());
     match cmd.spawn() {
         Ok(mut child) => {
             // Feed the task prompt via stdin for pipe-fed CLIs (claude -p).
@@ -1200,6 +1214,12 @@ fn spawn(
     parent_id: Option<&str>,
     prompt: Option<&str>,
     treehouse: &Treehouse,
+    bridge_rx: &std::sync::Mutex<
+        std::collections::HashMap<
+            String,
+            std::sync::mpsc::Receiver<anti_daemon::event_bridge::BridgedEvent>,
+        >,
+    >,
 ) -> Response {
     // 1. validate
     if id.trim().is_empty() {
@@ -1273,17 +1293,6 @@ fn spawn(
     let _ = store.set_workspace(id, &worktree.lease_id, &worktree.path.display().to_string());
 
     // 5-6. spawn the harness non-interactively inside the leased worktree
-    let log_path = std::env::var("HOME")
-        .map(|h| PathBuf::from(h).join(".anti_subagent/logs"))
-        .unwrap_or_else(|_| PathBuf::from("/tmp/anti_logs"));
-    std::fs::create_dir_all(&log_path).ok();
-    let log_file = log_path.join(format!("{id}.log"));
-    // Truncate previous session log (see restart_agent).
-    let _ = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .open(&log_file);
     let peer_prompt = prompt.unwrap_or(
         "You are a peer working on this repository with the project owner. Work independently.",
     );
@@ -1305,19 +1314,9 @@ fn spawn(
             return Response::err("spawn", e.to_string());
         }
     };
-    cmd.stdout(std::process::Stdio::from(
-        std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_file)
-            .unwrap_or_else(|_| {
-                std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open("/dev/null")
-                    .unwrap()
-            }),
-    ));
+    // Pipe stdout for NDJSON event reading (event_bridge) instead of
+    // redirecting to log file. Stderr stays inherited for debug output.
+    cmd.stdout(std::process::Stdio::piped());
     match cmd.spawn() {
         Ok(mut child) => {
             // Feed the task prompt via stdin for pipe-fed CLIs (claude -p).
@@ -1336,6 +1335,14 @@ fn spawn(
                 EventType::AgentStarted,
                 json!({"pid": pid, "worktree": worktree.path.display().to_string()}),
             );
+            // Start event bridge: NDJSON → AgentEvent → channel.
+            // The reaper thread drains this channel and persists to Store.
+            // This makes provider activity (thinking, tool calls, completion)
+            // observable to the control plane.
+            let rx = anti_daemon::event_bridge::EventBridge::spawn(&mut child, id);
+            if let Ok(mut b) = bridge_rx.lock() {
+                b.insert(id.to_string(), rx);
+            }
             children.insert(id.to_string(), child);
             Response::ok(json!({
                 "id": id,
