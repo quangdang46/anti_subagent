@@ -761,10 +761,13 @@ fn spawn_peer_impl(
     match cmd.spawn() {
         Ok(mut child) => {
             // Feed the task prompt via stdin for pipe-fed CLIs (claude -p).
+            // If task_path is an existing file, read its content as the prompt.
+            // Otherwise, treat the string as literal task text.
             if let Some(task) = task_path {
+                let prompt = resolve_task_prompt(task);
                 if let Some(mut stdin) = child.stdin.take() {
                     use std::io::Write;
-                    let _ = stdin.write_all(task.as_bytes());
+                    let _ = stdin.write_all(prompt.as_bytes());
                     drop(stdin);
                 }
             }
@@ -1320,10 +1323,13 @@ fn spawn(
     match cmd.spawn() {
         Ok(mut child) => {
             // Feed the task prompt via stdin for pipe-fed CLIs (claude -p).
+            // If task_path is an existing file, read its content as the prompt.
+            // Otherwise, treat the string as literal task text.
             if let Some(task) = task_path {
+                let prompt = resolve_task_prompt(task);
                 if let Some(mut stdin) = child.stdin.take() {
                     use std::io::Write;
-                    let _ = stdin.write_all(task.as_bytes());
+                    let _ = stdin.write_all(prompt.as_bytes());
                     drop(stdin);
                 }
             }
@@ -1381,4 +1387,18 @@ fn parse_status(s: &str) -> Option<AgentStatus> {
         "stopped" => AgentStatus::Stopped,
         _ => return None,
     })
+}
+
+/// Resolve a task prompt: if the string is a path to an existing file, read
+/// its content. Otherwise treat it as literal task text.
+fn resolve_task_prompt(task: &str) -> String {
+    let path = std::path::Path::new(task);
+    if path.is_file() {
+        match std::fs::read_to_string(path) {
+            Ok(content) => content,
+            Err(_) => task.to_string(), // fallback to literal
+        }
+    } else {
+        task.to_string()
+    }
 }
