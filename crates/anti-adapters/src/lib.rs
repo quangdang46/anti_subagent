@@ -2,10 +2,9 @@
 //! P0-P4: Claude Code. P5: Codex. OpenCode later.
 //!
 //! CLI-first, SDK-sidecar only on capability gap (h9h): Claude uses
-//! `claude -p --input-format stream-json --output-format stream-json` when
-//! supported, with NDJSON -> AgentEvent normalization. One-shot json is the
-//! compatibility fallback. No Node/Python SDK sidecar in this bead.
-
+//! `claude -p --output-format stream-json --verbose` with NDJSON -> AgentEvent
+//! normalization. Input is plain text via stdin (default --input-format text).
+//! One-shot json is the compatibility fallback. No Node/Python SDK sidecar in this bead.
 pub mod capabilities;
 pub mod claude_session;
 pub mod events;
@@ -53,9 +52,9 @@ pub struct SpawnContext {
 }
 
 /// Claude Code adapter. CLI-first (h9h):
-/// - Default: `claude -p --input-format stream-json --output-format stream-json --session-id <uuid>`.
+/// - Default: `claude -p --verbose --output-format stream-json`.
 /// - Fallback (binary without stream-json): one-shot `claude -p --output-format json`.
-/// - Peer prompt and task are injected via `--append-system-prompt` and stdin.
+/// - Peer prompt via --append-system-prompt, task via stdin (plain text, default input-format).
 pub struct ClaudeCodeAdapter;
 
 impl HarnessAdapter for ClaudeCodeAdapter {
@@ -64,18 +63,13 @@ impl HarnessAdapter for ClaudeCodeAdapter {
     }
 
     fn spawn_command(&self, ctx: &SpawnContext) -> Result<Command, AdapterError> {
-        // Capability probe: if stream-json is supported, use it.
         let caps = capabilities::CapabilityFlags::probe("claude", "claude");
         let use_stream = caps.streaming;
         let mut cmd = Command::new("claude");
         cmd.arg("-p");
         if use_stream {
-            cmd.args([
-                "--input-format",
-                "stream-json",
-                "--output-format",
-                "stream-json",
-            ]);
+            // stream-json output requires --verbose; input stays default "text" (plain text stdin)
+            cmd.args(["--verbose", "--output-format", "stream-json"]);
         } else {
             cmd.args(["--output-format", "json"]);
         }
