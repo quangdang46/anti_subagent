@@ -61,8 +61,14 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
-    /// Show status of one agent
-    Status { id: String },
+    /// Show status of one agent (or full hierarchy with --json)
+    Status {
+        /// Agent id; omit with --json for the whole SLP hierarchy
+        id: Option<String>,
+        /// Emit machine-readable JSON (hierarchy when no id given)
+        #[arg(long)]
+        json: bool,
+    },
     /// Block until an agent reaches a status (event-gated, no polling)
     Wait {
         id: String,
@@ -244,7 +250,22 @@ fn main() {
         Commands::List { role, status, json } => {
             commands::list(&state_dir, role.as_deref(), status.as_deref(), json)
         }
-        Commands::Status { id } => commands::status(&state_dir, &id),
+        Commands::Status { id, json } => {
+            if json {
+                match id.as_deref() {
+                    Some(id) => commands::status(&state_dir, id),
+                    None => commands::hierarchy(&state_dir),
+                }
+            } else {
+                match id.as_deref() {
+                    Some(id) => commands::status(&state_dir, id),
+                    None => Err(
+                        "anti status: an <id> is required (or pass --json for the hierarchy)"
+                            .into(),
+                    ),
+                }
+            }
+        }
         Commands::Wait { id, until, timeout } => commands::wait(&state_dir, &id, &until, timeout),
         Commands::Stop { id } => commands::stop(&state_dir, &id, false),
         Commands::Kill { id } => commands::stop(&state_dir, &id, true),

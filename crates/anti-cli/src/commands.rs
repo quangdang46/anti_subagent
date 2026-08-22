@@ -417,6 +417,16 @@ pub fn guard_status(state_dir: &PathBuf) -> Result<String, String> {
     }
 }
 
+/// Issue #8: full SLP hierarchy snapshot — supervisor/leads/peers + attention
+/// queue. Same serializer the HTTP control surface uses.
+pub fn hierarchy(state_dir: &PathBuf) -> Result<String, String> {
+    if !daemon_running(state_dir) {
+        return Err("daemon not running — start it first with `anti daemon start`".into());
+    }
+    let resp = ipc::send_request(&socket(state_dir), &Request::GetHierarchy)?;
+    check(resp)
+}
+
 pub fn doctor(state_dir: &PathBuf) -> Result<String, String> {
     let mut lines = vec![format!("state_dir: {}", state_dir.display())];
     lines.push(if daemon_running(state_dir) {

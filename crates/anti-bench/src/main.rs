@@ -268,6 +268,23 @@ fn run_arm(arm: Arm, repo: &str, task: &str) -> RunMetrics {
                         "REVIEW_ESCALATED" => m.escalations += 1,
                         _ => {}
                     }
+                    // Issue #4: token usage lives on provider TurnCompleted
+                    // events (payload.usage) — accumulate, never estimate.
+                    if t == "AGENT_COMPLETED"
+                        && let Some(usage) = e
+                            .get("payload")
+                            .and_then(|p| p.get("usage"))
+                            .filter(|u| !u.is_null())
+                    {
+                        m.tokens_in += usage
+                            .get("input_tokens")
+                            .and_then(|x| x.as_u64())
+                            .unwrap_or(0);
+                        m.tokens_out += usage
+                            .get("output_tokens")
+                            .and_then(|x| x.as_u64())
+                            .unwrap_or(0);
+                    }
                 }
             }
         }
@@ -332,4 +349,79 @@ fn run_index() -> u64 {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     (start % 100_000) * 1000 + n
+}
+
+#[cfg(test)]
+mod token_tests {
+    use super::*;
+
+    /// Mirrors the daemon's persisted payload shape (issue #4): AGENT_COMPLETED
+    /// events carry `usage` verbatim from the provider TurnCompleted event.
+    fn completed_event(agent_id: &str, input: u64, output: u64) -> String {
+        serde_json::json!({
+            "seq": 1,
+            "timestamp": "2026-01-01T00:00:00Z",
+            "agent_id": agent_id,
+            "type": "AGENT_COMPLETED",
+            "payload": {
+                "kind": "TurnCompleted { usage: Some(Usage { .. }) }",
+                "provider_event": true,
+                "usage": {
+                    "input_tokens": input,
+                    "output_tokens": output,
+                    "context_window_max": null,
+                    "total_cost_usd": 0.0
+                }
+            }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn tokens_accumulate_across_multiple_turns() {
+        let log = format!(
+            "{}\n{}\n{}\n",
+            completed_event("bench-c-1-task", 100, 10),
+            completed_event("bench-c-1-task", 200, 20),
+            // Other agent's event — must be ignored.
+            completed_event("bench-d-9-other", 999, 999),
+        );
+        let mut m = RunMetrics::default();
+        for line in log.lines() {
+            let e: serde_json::Value = serde_json::from_str(line).unwrap();
+            if e.get("agent_id").and_then(|v| v.as_str()) == Some("bench-c-1-task")
+                && e.get("type").and_then(|v| v.as_str()) == Some("AGENT_COMPLETED")
+                && let Some(usage) = e
+                    .get("payload")
+                    .and_then(|p| p.get("usage"))
+                    .filter(|u| !u.is_null())
+            {
+                m.tokens_in += usage
+                    .get("input_tokens")
+                    .and_then(|x| x.as_u64())
+                    .unwrap_or(0);
+                m.tokens_out += usage
+                    .get("output_tokens")
+                    .and_then(|x| x.as_u64())
+                    .unwrap_or(0);
+            }
+        }
+        assert_eq!(m.tokens_in, 300);
+        assert_eq!(m.tokens_out, 30);
+    }
+
+    #[test]
+    fn missing_usage_is_tolerated() {
+        let ev = serde_json::json!({
+            "seq": 2,
+            "agent_id": "a",
+            "type": "AGENT_COMPLETED",
+            "payload": {"kind": "x", "provider_event": true, "usage": null}
+        });
+        let usage = ev
+            .get("payload")
+            .and_then(|p| p.get("usage"))
+            .filter(|u| !u.is_null());
+        assert!(usage.is_none(), "null usage must not contribute tokens");
+    }
 }

@@ -9,6 +9,7 @@ use crate::events::AgentEvent;
 use crate::info_filter::{InternalAgentState, build_agent_context, build_session_config};
 use crate::model::{Disposition, Role};
 use crate::provider::{PersistenceHandle, ProviderKind};
+use crate::routing::{Complexity, resolve_route};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -145,8 +146,15 @@ impl SlpOrchestrator {
     /// Spawn a Supervisor agent.
     pub fn spawn_supervisor(&mut self) -> AgentId {
         let ws = WorkspaceId::new(std::path::Path::new("/supervisor"));
+        let route = resolve_route(
+            Role::Supervisor,
+            Disposition::Architect,
+            Complexity::High,
+            &crate::routing::ProviderConfig::default(),
+            "claude",
+        );
         let config = AgentConfig {
-            model: Some("claude-sonnet".into()),
+            model: Some(route.model),
             ..Default::default()
         };
         let mut record = AgentRecord::new(Role::Supervisor, ProviderKind::Claude, ws, config);
@@ -159,8 +167,15 @@ impl SlpOrchestrator {
 
     /// Spawn a Lead for a workspace.
     pub fn spawn_lead(&mut self, workspace_id: WorkspaceId) -> AgentId {
+        let route = resolve_route(
+            Role::Lead,
+            Disposition::Architect,
+            Complexity::High,
+            &crate::routing::ProviderConfig::default(),
+            "claude",
+        );
         let config = AgentConfig {
-            model: Some("claude-sonnet".into()),
+            model: Some(route.model),
             system_prompt: Some(
                 "You are a Lead coordinator. You own this workspace's outcome. \
                  Never implement code directly — only delegate and review."
@@ -330,6 +345,12 @@ mod tests {
         let agent = orch.get_agent(&id).unwrap();
         assert_eq!(agent.role, Role::Supervisor);
         assert_eq!(agent.status, crate::model::AgentStatus::Running);
+        // Issue #3: coordinator tier is resolved by routing, not hard-coded.
+        assert_eq!(
+            agent.config.model.as_deref(),
+            Some("opus"),
+            "supervisor must resolve to the heavyweight model"
+        );
     }
 
     #[test]

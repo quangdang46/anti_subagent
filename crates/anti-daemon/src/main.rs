@@ -206,6 +206,14 @@ fn main() {
                 Ok(()) => Response::ok(json!({"id": id, "attention": "cleared"})),
                 Err(e) => Response::err("store", e.to_string()),
             },
+            Request::GetHierarchy => {
+                let agents = store.list_agents().unwrap_or_default();
+                let attention = store
+                    .list_attention()
+                    .map(|v| v.into_iter().map(|a| a.id).collect::<Vec<_>>())
+                    .unwrap_or_default();
+                Response::ok(build_hierarchy(&agents, &attention))
+            }
             Request::ListAgents => match store.list_agents() {
                 Ok(agents) => Response::ok(agents),
                 Err(e) => Response::err("store", e.to_string()),
@@ -353,9 +361,19 @@ fn main() {
                             }
                             _ => EventType::AgentStarted,
                         };
+                        // Persist usage verbatim (issue #4): token/cost data is
+                        // the benchmark's ground truth — never strip it.
+                        let usage = match &bridged.event {
+                            anti_adapters::AgentEvent::TurnCompleted { usage } => match usage {
+                                Some(u) => serde_json::to_value(u).unwrap_or_default(),
+                                None => serde_json::Value::Null,
+                            },
+                            _ => serde_json::Value::Null,
+                        };
                         let payload = serde_json::json!({
                             "kind": format!("{:?}", bridged.event),
                             "provider_event": true,
+                            "usage": usage,
                         });
                         let _ = s.append_event(&bridged.agent_id, event_type, payload);
                     }
@@ -1356,6 +1374,12 @@ fn spawn(
     // If a worktree is dirty, Treehouse will reset it.
     let _ = store.set_workspace(id, &worktree.lease_id, &worktree.path.display().to_string());
 
+    // Issue #5: auto-install the delegation DENY guard into every peer
+    // worktree — no manual `anti guard install` step. Fail-open here (the
+    // guard script itself is fail-closed at enforcement time); a spawn must
+    // not die because hook files could not be written.
+    install_guard_into_worktree(&worktree.path);
+
     // 5-6. spawn the harness non-interactively inside the leased worktree
     let peer_prompt = prompt.unwrap_or(
         "You are a peer working on this repository with the project owner. Work independently.",
@@ -1451,6 +1475,140 @@ fn parse_status(s: &str) -> Option<AgentStatus> {
     })
 }
 
+/// Issue #8: stable hierarchy JSON — one serializer shared by the CLI
+/// (`anti status --json`) and any HTTP control surface. Schema:
+/// `{ supervisor, leads[], peers[], attention_queue[] }`.
+fn build_hierarchy(agents: &[AgentRecord], attention_ids: &[String]) -> serde_json::Value {
+    use anti_core::model::Role;
+
+    let mut supervisor = serde_json::Value::Null;
+    let mut leads = Vec::new();
+    let mut peers = Vec::new();
+
+    for a in agents {
+        let base = serde_json::json!({
+            "id": a.id,
+            "status": format!("{:?}", a.status).to_lowercase(),
+            "pid": a.pid,
+            "attention": a.attention.requires_attention,
+        });
+        match a.role {
+            Role::Supervisor => {
+                supervisor = base;
+            }
+            Role::Lead => {
+                let workspace = a
+                    .workspace
+                    .as_ref()
+                    .map(|w| w.path.clone())
+                    .unwrap_or_default();
+                // Peers under this lead (parent_id linkage).
+                let children: Vec<String> = agents
+                    .iter()
+                    .filter(|c| c.parent_id.as_deref() == Some(a.id.as_str()))
+                    .map(|c| c.id.clone())
+                    .collect();
+                leads.push(serde_json::json!({
+                    "id": a.id,
+                    "workspace": workspace,
+                    "peers": children,
+                    "status": base["status"],
+                    "pid": a.pid,
+                    "attention": a.attention.requires_attention,
+                }));
+            }
+            Role::Peer => {
+                peers.push(serde_json::json!({
+                    "id": a.id,
+                    "role": "peer",
+                    "disposition": a.disposition.map(|d| format!("{d:?}").to_lowercase()),
+                    "harness": format!("{:?}", a.harness).to_lowercase(),
+                    "status": base["status"],
+                    "pid": a.pid,
+                    "task": a.task_path,
+                    "parent": a.parent_id,
+                    "attention": a.attention.requires_attention,
+                }));
+            }
+        }
+    }
+
+    serde_json::json!({
+        "supervisor": supervisor,
+        "leads": leads,
+        "peers": peers,
+        "attention_queue": attention_ids,
+    })
+}
+
+/// Issue #5: copy the deny-guard hook into a peer worktree so every spawned
+/// peer is fail-closed against delegation-shaped tools from birth.
+///
+/// The hook command points at the shared script under the state dir
+/// (`$state_dir/guard/anti-guard.sh`) when present, falling back to the
+/// repo checkout's `guard/anti-guard.sh`. `ANTI_MANAGED=1` is baked into the
+/// hooks env so the script's scope gate engages inside the worktree.
+fn install_guard_into_worktree(worktree: &std::path::Path) {
+    let state_dir = std::env::var("ANTI_STATE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::env::var("HOME")
+                .map(|h| PathBuf::from(h).join(".anti_subagent"))
+                .unwrap_or_else(|_| PathBuf::from("."))
+        });
+    // Locate the guard script: state dir first, then repo-relative.
+    let script = [
+        state_dir.join("guard").join("anti-guard.sh"),
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join("guard")
+            .join("anti-guard.sh"),
+    ]
+    .into_iter()
+    .find(|p| p.is_file());
+
+    let claude_dir = worktree.join(".claude");
+    if let Err(e) = std::fs::create_dir_all(&claude_dir) {
+        eprintln!("[guard] cannot create {}/.claude: {e}", worktree.display());
+        return;
+    }
+    // Always ship a local copy of the rules + script so the peer does not
+    // depend on paths outside its sandbox.
+    let mut hook_cmd = String::new();
+    if let Some(src) = &script {
+        let dest = claude_dir.join("anti-guard.sh");
+        match std::fs::copy(src, &dest) {
+            Ok(_) => {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755));
+                }
+                hook_cmd = dest.display().to_string();
+            }
+            Err(e) => eprintln!("[guard] copy failed: {e}"),
+        }
+    }
+    if hook_cmd.is_empty() {
+        // Fall back to invoking via bash so it works without +x.
+        hook_cmd = "bash anti-guard.sh".to_string();
+    }
+
+    let hooks = serde_json::json!({
+        "PreToolUse": [{
+            "matcher": ".*",
+            "hooks": [{"type": "command", "command": hook_cmd}]
+        }],
+        "_anti_guard": {"installed_by": "daemon-spawn", "fail_closed": true}
+    });
+    if let Err(e) = std::fs::write(
+        claude_dir.join("hooks.json"),
+        serde_json::to_string_pretty(&hooks).unwrap_or_default(),
+    ) {
+        eprintln!("[guard] hooks.json write failed: {e}");
+    }
+}
+
 /// Resolve a task prompt: if the string is a path to an existing file, read
 /// its content. Otherwise treat it as literal task text.
 fn resolve_task_prompt(task: &str) -> String {
@@ -1462,5 +1620,63 @@ fn resolve_task_prompt(task: &str) -> String {
         }
     } else {
         task.to_string()
+    }
+}
+
+#[cfg(test)]
+mod hierarchy_tests {
+    use super::*;
+
+    #[test]
+    fn hierarchy_shape_supervisor_leads_peers_attention() {
+        let mut a = Vec::new();
+        a.push(rec("sup", Role::Supervisor, None, false));
+        a.push(rec("lead1", Role::Lead, None, false));
+        a.push(rec("p1", Role::Peer, Some("lead1".into()), true));
+        let attention = vec!["p1".to_string()];
+        let h = build_hierarchy(&a, &attention);
+        assert!(h.get("supervisor").and_then(|s| s.get("id")).is_some());
+        assert_eq!(h["supervisor"]["id"], "sup");
+        assert_eq!(h["leads"].as_array().unwrap().len(), 1);
+        assert_eq!(h["leads"][0]["peers"][0], "p1");
+        assert_eq!(h["peers"].as_array().unwrap().len(), 1);
+        assert_eq!(h["attention_queue"][0], "p1");
+    }
+
+    #[test]
+    fn empty_store_renders_null_supervisor() {
+        let h = build_hierarchy(&[], &[]);
+        assert!(h["supervisor"].is_null());
+        assert_eq!(h["leads"].as_array().unwrap().len(), 0);
+    }
+
+    // Minimal AgentRecord factory (fields not under test are defaulted).
+    fn rec(
+        id: &str,
+        role: anti_core::model::Role,
+        parent: Option<String>,
+        needs_attention: bool,
+    ) -> AgentRecord {
+        AgentRecord {
+            id: id.to_string(),
+            role,
+            disposition: None,
+            harness: anti_core::model::Harness::Claude,
+            parent_id: parent,
+            pid: Some(42),
+            workspace: None,
+            task_path: None,
+            status: AgentStatus::Running,
+            restart_count: 0,
+            spawn_gen: 1,
+            last_state_change_seq: 0,
+            created_at: String::new(),
+            updated_at: String::new(),
+            attention: anti_core::attention::AttentionState {
+                requires_attention: needs_attention,
+                reason: None,
+                timestamp: None,
+            },
+        }
     }
 }

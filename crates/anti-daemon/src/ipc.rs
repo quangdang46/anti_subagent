@@ -89,6 +89,9 @@ pub enum Request {
         parent_id: Option<String>,
         prompt: Option<String>,
     },
+    /// Full SLP hierarchy snapshot (issue #8): supervisor/leads/peers +
+    /// attention queue. One serializer shared by CLI --json and HTTP surface.
+    GetHierarchy,
     ListAgents,
     /// List only agents requiring attention (supervisor/human triage queue).
     ListAttention,

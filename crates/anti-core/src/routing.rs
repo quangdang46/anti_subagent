@@ -3,7 +3,7 @@
 //! Disposition × Complexity → CapabilityTier → model (from provider config).
 //! Model names come from provider config, NOT from anti-core.
 
-use crate::model::Disposition;
+use crate::model::{Disposition, Role};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -92,21 +92,29 @@ impl Default for ProviderConfig {
     }
 }
 
-/// Resolve model route from disposition and complexity.
+/// Resolve model route from hierarchy role × disposition × complexity.
+///
+/// Rule (issue #3): Supervisor and Lead always get the Heavyweight tier —
+/// coordinators must never be the bottleneck. Peers keep the
+/// disposition × complexity mapping.
 pub fn resolve_route(
+    role: Role,
     disposition: Disposition,
     complexity: Complexity,
     config: &ProviderConfig,
     default_provider: &str,
 ) -> ModelRoute {
-    let capability = match (&disposition, &complexity) {
-        (Disposition::Scout, _) | (Disposition::Shadow, _) => CapabilityTier::Lightweight,
-        (Disposition::Engineer, Complexity::Low) => CapabilityTier::Standard,
-        (Disposition::Engineer, Complexity::High) => CapabilityTier::Heavyweight,
-        (Disposition::Engineer, Complexity::Medium) => CapabilityTier::Standard,
-        (Disposition::ProofAuditor, _) => CapabilityTier::Heavyweight,
-        (Disposition::Reviewer, _) => CapabilityTier::Standard,
-        (Disposition::Architect, _) => CapabilityTier::Standard,
+    let capability = match role {
+        Role::Supervisor | Role::Lead => CapabilityTier::Heavyweight,
+        Role::Peer => match (&disposition, &complexity) {
+            (Disposition::Scout, _) | (Disposition::Shadow, _) => CapabilityTier::Lightweight,
+            (Disposition::Engineer, Complexity::Low) => CapabilityTier::Standard,
+            (Disposition::Engineer, Complexity::High) => CapabilityTier::Heavyweight,
+            (Disposition::Engineer, Complexity::Medium) => CapabilityTier::Standard,
+            (Disposition::ProofAuditor, _) => CapabilityTier::Heavyweight,
+            (Disposition::Reviewer, _) => CapabilityTier::Standard,
+            (Disposition::Architect, _) => CapabilityTier::Standard,
+        },
     };
 
     let model = config.resolve(default_provider, &capability);
@@ -120,6 +128,22 @@ pub fn resolve_route(
     }
 }
 
+/// Peer-only convenience wrapper (non-governance callers).
+pub fn resolve_peer_route(
+    disposition: Disposition,
+    complexity: Complexity,
+    config: &ProviderConfig,
+    default_provider: &str,
+) -> ModelRoute {
+    resolve_route(
+        Role::Peer,
+        disposition,
+        complexity,
+        config,
+        default_provider,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -127,7 +151,13 @@ mod tests {
     #[test]
     fn scout_always_lightweight() {
         let config = ProviderConfig::default();
-        let route = resolve_route(Disposition::Scout, Complexity::High, &config, "claude");
+        let route = resolve_route(
+            Role::Peer,
+            Disposition::Scout,
+            Complexity::High,
+            &config,
+            "claude",
+        );
         assert_eq!(route.capability, CapabilityTier::Lightweight);
         assert_eq!(route.model, "haiku");
     }
@@ -135,7 +165,13 @@ mod tests {
     #[test]
     fn engineer_high_complexity_heavyweight() {
         let config = ProviderConfig::default();
-        let route = resolve_route(Disposition::Engineer, Complexity::High, &config, "claude");
+        let route = resolve_route(
+            Role::Peer,
+            Disposition::Engineer,
+            Complexity::High,
+            &config,
+            "claude",
+        );
         assert_eq!(route.capability, CapabilityTier::Heavyweight);
         assert_eq!(route.model, "opus");
     }
@@ -143,7 +179,13 @@ mod tests {
     #[test]
     fn engineer_low_complexity_standard() {
         let config = ProviderConfig::default();
-        let route = resolve_route(Disposition::Engineer, Complexity::Low, &config, "claude");
+        let route = resolve_route(
+            Role::Peer,
+            Disposition::Engineer,
+            Complexity::Low,
+            &config,
+            "claude",
+        );
         assert_eq!(route.capability, CapabilityTier::Standard);
         assert_eq!(route.model, "sonnet");
     }
@@ -152,6 +194,7 @@ mod tests {
     fn proof_auditor_always_heavyweight() {
         let config = ProviderConfig::default();
         let route = resolve_route(
+            Role::Peer,
             Disposition::ProofAuditor,
             Complexity::Low,
             &config,
@@ -164,8 +207,67 @@ mod tests {
     #[test]
     fn codex_provider() {
         let config = ProviderConfig::default();
-        let route = resolve_route(Disposition::Engineer, Complexity::Medium, &config, "codex");
+        let route = resolve_route(
+            Role::Peer,
+            Disposition::Engineer,
+            Complexity::Medium,
+            &config,
+            "codex",
+        );
         assert_eq!(route.provider, "codex");
         assert_eq!(route.model, "gpt-4o");
+    }
+
+    // ── Issue #3: role-aware tiering ──
+
+    #[test]
+    fn supervisor_always_heavyweight() {
+        let config = ProviderConfig::default();
+        for d in [
+            Disposition::Scout,
+            Disposition::Shadow,
+            Disposition::Engineer,
+            Disposition::Reviewer,
+            Disposition::Architect,
+            Disposition::ProofAuditor,
+        ] {
+            let route = resolve_route(Role::Supervisor, d, Complexity::Low, &config, "claude");
+            assert_eq!(route.capability, CapabilityTier::Heavyweight, "{d:?}");
+            assert_eq!(route.model, "opus", "{d:?}");
+        }
+    }
+
+    #[test]
+    fn lead_always_heavyweight() {
+        let config = ProviderConfig::default();
+        let route = resolve_route(
+            Role::Lead,
+            Disposition::Scout,
+            Complexity::Medium,
+            &config,
+            "claude",
+        );
+        assert_eq!(route.capability, CapabilityTier::Heavyweight);
+        assert_eq!(route.model, "opus");
+    }
+
+    #[test]
+    fn peer_engineer_high_still_heavyweight() {
+        let config = ProviderConfig::default();
+        let route = resolve_route(
+            Role::Peer,
+            Disposition::Engineer,
+            Complexity::High,
+            &config,
+            "claude",
+        );
+        assert_eq!(route.capability, CapabilityTier::Heavyweight);
+    }
+
+    #[test]
+    fn peer_scout_lightweight_unchanged() {
+        let config = ProviderConfig::default();
+        let route = resolve_peer_route(Disposition::Scout, Complexity::High, &config, "claude");
+        assert_eq!(route.model, "haiku");
     }
 }
