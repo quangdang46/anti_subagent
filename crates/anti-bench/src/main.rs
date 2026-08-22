@@ -226,12 +226,81 @@ fn arm_name(arm: Arm) -> &'static str {
     }
 }
 
+/// Paseo-style acceptance gate (loop-service.ts `runVerification`): a peer
+/// exiting 0 says nothing about the deliverable. After WaitAgent returns,
+/// run each shell check in the repo; ALL must pass for task_success=true.
+///
+/// Checks come from (first wins):
+/// 1. `.anti_bench_checks` file in the repo — one shell command per line
+/// 2. `ANTI_BENCH_CHECKS` env var — commands separated by `&&`
+/// 3. Default: no checks (gate passes; exit-0-only semantics, old behavior)
+struct AcceptanceGate {
+    checks: Vec<String>,
+}
+
+#[derive(Debug)]
+struct CheckResult {
+    command: String,
+    passed: bool,
+    exit_code: i32,
+}
+
+impl AcceptanceGate {
+    fn load(repo: &str) -> Self {
+        let mut checks = Vec::new();
+        let file = PathBuf::from(repo).join(".anti_bench_checks");
+        if let Ok(content) = std::fs::read_to_string(&file) {
+            for line in content.lines() {
+                let line = line.trim();
+                if !line.is_empty() && !line.starts_with('#') {
+                    checks.push(line.to_string());
+                }
+            }
+        } else if let Ok(env) = std::env::var("ANTI_BENCH_CHECKS") {
+            for cmd in env.split("&&") {
+                let cmd = cmd.trim();
+                if !cmd.is_empty() {
+                    checks.push(cmd.to_string());
+                }
+            }
+        }
+        AcceptanceGate { checks }
+    }
+
+    /// Run every check; short-circuits on first failure (paseo semantics).
+    fn run(&self, repo: &str) -> Vec<CheckResult> {
+        let mut results = Vec::new();
+        for command in &self.checks {
+            let output = std::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg(command)
+                .current_dir(repo)
+                .output();
+            let (code, passed) = match output {
+                Ok(o) => (
+                    o.status.code().unwrap_or(-1),
+                    o.status.code().unwrap_or(-1) == 0,
+                ),
+                Err(_) => (-1, false),
+            };
+            results.push(CheckResult {
+                command: command.clone(),
+                passed,
+                exit_code: code,
+            });
+            if !passed {
+                break;
+            }
+        }
+        results
+    }
+}
+
 /// Run one arm/task. Uses the daemon socket directly so metrics come from
 /// anti's own registry/events (plan §36) — never agent self-reports.
 fn run_arm(arm: Arm, repo: &str, task: &str) -> RunMetrics {
     let start = std::time::Instant::now();
     let mut m = RunMetrics::default();
-
     // Unique id per run so reruns never collide with stale records/events.
     let idx = run_index();
     match arm {
@@ -288,6 +357,16 @@ fn run_arm(arm: Arm, repo: &str, task: &str) -> RunMetrics {
                 )),
             );
         }
+    }
+
+    // Paseo lesson (P3): exit-0 ≠ done. Gate task_success behind real shell
+    // checks run against the deliverable in the repo.
+    let gate = AcceptanceGate::load(repo);
+    let gate_results = gate.run(repo);
+    if !gate.checks.is_empty() {
+        let all_passed =
+            gate_results.iter().all(|r| r.passed) && gate_results.len() == gate.checks.len();
+        m.task_success = m.task_success && all_passed;
     }
 
     m.wall_secs = start.elapsed().as_secs_f64();
@@ -408,6 +487,65 @@ fn run_index() -> u64 {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     (start % 100_000) * 1000 + n
+}
+
+#[cfg(test)]
+mod gate_tests {
+    use super::*;
+
+    #[test]
+    fn gate_loads_checks_from_file() {
+        let dir = std::env::temp_dir().join(format!("bench-gate-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(".anti_bench_checks"),
+            "# comment line\ntrue\n\nfalse\n",
+        )
+        .unwrap();
+        let gate = AcceptanceGate::load(dir.to_str().unwrap());
+        assert_eq!(gate.checks, vec!["true".to_string(), "false".to_string()]);
+        let results = gate.run(dir.to_str().unwrap());
+        // Short-circuit: 'true' passes, 'false' fails and stops the run.
+        assert_eq!(results.len(), 2);
+        assert!(results[0].passed);
+        assert!(!results[1].passed);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn gate_empty_passes_nothing_runs() {
+        let dir = std::env::temp_dir().join(format!("bench-gate-e-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let gate = AcceptanceGate::load(dir.to_str().unwrap());
+        assert!(gate.checks.is_empty());
+        assert!(gate.run(dir.to_str().unwrap()).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn gate_failing_command_reports_exit_code() {
+        let repo = std::env::temp_dir().join(format!("bench-gate-x-{}", std::process::id()));
+        std::fs::create_dir_all(&repo).unwrap();
+        assert!(repo.exists(), "repo must exist right after create");
+
+        // Checks via env (edition 2024: env mutation is unsafe).
+        unsafe {
+            std::env::set_var("ANTI_BENCH_CHECKS", "exit 7");
+        }
+        let gate = AcceptanceGate::load(repo.to_str().unwrap());
+        unsafe {
+            std::env::remove_var("ANTI_BENCH_CHECKS");
+        }
+        assert_eq!(gate.checks.len(), 1);
+
+        // Run against a FRESH cwd that we know exists — the point of this
+        // test is exit-code capture, not cwd lifecycle.
+        let cwd = std::env::current_dir().unwrap();
+        let results = gate.run(cwd.to_str().unwrap());
+        assert_eq!(results[0].exit_code, 7);
+        assert!(!results[0].passed);
+        let _ = std::fs::remove_dir_all(&repo);
+    }
 }
 
 #[cfg(test)]
