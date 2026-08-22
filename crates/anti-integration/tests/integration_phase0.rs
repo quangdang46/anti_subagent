@@ -463,3 +463,71 @@ fn t6_crash_recovery_on_restart() {
 
     println!("T6 PASS: crash recovery on restart works");
 }
+
+// ─── T7: Spawn with an origin remote (remote-tracking branch resolution) ──
+
+impl Env {
+    /// Same as `new`, but the repo also carries a proper bare `origin` remote
+    /// so treehouse takes the refs/remotes/origin/<branch> resolution path —
+    /// the one real-world repos always exercise.
+    fn new_with_origin(tag: &str) -> Self {
+        let mut env = Self::new(tag);
+        let base = env.repo.parent().unwrap().join(format!("{tag}-origin.git"));
+        let git = |args: &[&str], cwd: &std::path::Path| {
+            Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .expect("git failed")
+        };
+        assert!(
+            git(
+                &["init", "-q", "--bare", base.to_str().unwrap()],
+                base.parent().unwrap()
+            )
+            .status
+            .success(),
+            "bare init failed"
+        );
+        assert!(
+            git(
+                &["remote", "add", "origin", base.to_str().unwrap()],
+                &env.repo
+            )
+            .status
+            .success(),
+            "remote add failed"
+        );
+        assert!(
+            git(&["push", "-q", "-u", "origin", "HEAD"], &env.repo)
+                .status
+                .success(),
+            "origin push failed"
+        );
+        env
+    }
+}
+
+#[test]
+fn t7_spawn_peer_with_origin_remote() {
+    kill_all();
+    let env = Env::new_with_origin("t7");
+    assert!(start_daemon(&env.state_dir), "daemon failed to start");
+
+    // Remote-tracking resolution must not change spawn semantics.
+    let (out, code) = env.spawn_sleep("t7-spawn", 120);
+    assert_eq!(code, 0, "spawn with origin remote failed: {out}");
+    assert!(out.contains("running"), "expected running status: {out}");
+
+    let pid = Env::pid_of(&out);
+    assert!(pid > 0, "PID should be positive: {out}");
+    assert!(is_process_alive(pid), "peer should be alive");
+
+    let status_out = wait_status(&env, "t7-spawn", &["RUNNING", "Running"], 5);
+    assert!(
+        status_out.contains("UNNING"),
+        "expected RUNNING: {status_out}"
+    );
+
+    println!("T7 PASS: spawn works when origin remote is present");
+}

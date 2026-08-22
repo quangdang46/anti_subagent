@@ -4,7 +4,7 @@
 
 ![Status](https://img.shields.io/badge/status-MVP%20verified-brightgreen)
 ![Approach](https://img.shields.io/badge/approach-SLP%20orchestration-blue)
-![Tests](https://img.shields.io/badge/tests-117%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-222%20unit%20%C2%B7%206%20integration%20passing-brightgreen)
 
 </div>
 

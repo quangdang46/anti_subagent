@@ -1453,6 +1453,9 @@ fn spawn(
     // guard script itself is fail-closed at enforcement time); a spawn must
     // not die because hook files could not be written.
     install_guard_into_worktree(&worktree.path);
+    // Strict scope-gate marker: the guard script trusts this file over
+    // path-name heuristics.
+    let _ = std::fs::write(worktree.path.join(".anti_managed"), "1\n");
 
     // 5-6. spawn the harness non-interactively inside the leased worktree
     let peer_prompt = prompt.unwrap_or(

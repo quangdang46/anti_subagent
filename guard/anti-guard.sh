@@ -38,24 +38,26 @@ esac
 # ─── Scope gate: only enforce in anti-managed peer worktrees ──────────────
 SCOPE_GATE="${ANTI_GUARD_SCOPE_GATE:-true}"
 if [ "$SCOPE_GATE" = "true" ]; then
-    # Simple heuristic: cwd must be under ANTI_STATE_DIR or a treehouse pool
-    # dir. If not, allow (Supervisor/Lead session).
     CWD="${PWD:-$(pwd)}"
-    STATE_HOME="${ANTI_STATE_DIR:-$HOME/.anti_subagent}"
-    case "$CWD" in
-        "$STATE_HOME"*) ;; # in-scope
-        *)
-            # Check treehouse pool locations
-            case "$CWD" in
-                *treehouse*|*worktree*)
-                    ;; # in-scope (treehouse pool)
-                *)
-                    # Not in a peer workspace — allow (guard doesn't apply here)
-                    exit 0
-                    ;;
-            esac
-            ;;
-    esac
+    # Strict check first: an explicit marker file written by the daemon at
+    # spawn time. No heuristic needed when the marker exists.
+    if [ -f "$CWD/.anti_managed" ]; then
+        : # in-scope (marker)
+    else
+        STATE_HOME="${ANTI_STATE_DIR:-$HOME/.anti_subagent}"
+        case "$CWD" in
+            "$STATE_HOME"*) ;; # in-scope (state dir)
+            *)
+                case "$CWD" in
+                    *treehouse*|*worktree*)
+                        ;; # in-scope (treehouse pool, legacy heuristic)
+                    *)
+                        exit 0 # not a peer workspace — allow
+                        ;;
+                esac
+                ;;
+        esac
+    fi
 fi
 
 # ─── Deny-by-stem classification (fail-closed for delegation) ────────────
@@ -67,7 +69,7 @@ for STEM in $DENY_STEMS; do
         SOCK="$STATE_DIR/anti.sock"
         RESULT="deny"   # fail-closed default
         if [ -S "$SOCK" ]; then
-            RESPONSE=$(timeout 0.05 bash -c "echo '{\"method\":\"GuardCheck\",\"params\":{\"tool\":\"$TOOL_NAME\"}}' | socat - UNIX-CLIENT:\"$SOCK\" 2>/dev/null || echo \"{}\"" 2>/dev/null || echo "{}")
+            RESPONSE=$(timeout 0.4 bash -c "echo '{\"method\":\"GuardCheck\",\"params\":{\"tool\":\"$TOOL_NAME\"}}' | socat - UNIX-CLIENT:\"$SOCK\" 2>/dev/null || echo \"{}\"" 2>/dev/null || echo "{}")
             PARSED=$(echo "$RESPONSE" | jq -r '.ok.data.allowed // empty' 2>/dev/null || echo "")
             if [ "$PARSED" = "true" ]; then
                 RESULT="allow"
