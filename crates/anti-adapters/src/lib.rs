@@ -105,7 +105,15 @@ impl HarnessAdapter for CodexAdapter {
         cmd.args(["exec", "--json", "--skip-git-repo-check", "-C"]);
         cmd.arg(ctx.worktree.as_os_str());
         if let Some(task) = &ctx.task {
-            cmd.arg(task);
+            // `codex exec <arg>` takes a PROMPT, not a path. If the task is a
+            // file path (the daemon's convention), inline its content —
+            // otherwise the model sees a literal path and may wander.
+            let prompt = std::path::Path::new(task)
+                .is_file()
+                .then(|| std::fs::read_to_string(task).ok())
+                .flatten()
+                .unwrap_or_else(|| task.to_string());
+            cmd.arg(prompt);
         }
         if let Some(pp) = &ctx.peer_prompt {
             // Prepend peer prompt as part of task (codex has no --append-system-prompt)
