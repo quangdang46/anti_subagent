@@ -11,7 +11,9 @@
 set -uo pipefail
 
 TOOL_JSON=$(cat -)
-TOOL_NAME=$(echo "$TOOL_JSON" | jq -r '.tool // .name // ""' 2>/dev/null || echo "")
+# B4: Claude Code PreToolUse stdin uses `tool_name`; keep `.tool`/`.name`
+# fallbacks for other harness shapes and local testing.
+TOOL_NAME=$(echo "$TOOL_JSON" | jq -r '.tool_name // .tool // .name // ""' 2>/dev/null || echo "")
 if [ -z "$TOOL_NAME" ]; then
     # Malformed input → fail-closed (deny)
     echo '{"error":"malformed: no tool name"}' >&2
