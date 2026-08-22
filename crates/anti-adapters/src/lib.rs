@@ -118,6 +118,67 @@ impl HarnessAdapter for CodexAdapter {
     }
 }
 
+/// OpenCode adapter (real CLI: `opencode run --format json --model <m> [--dir <dir>] <message>`).
+///
+/// Model resolution order:
+/// 1. `ANTI_OPENCODE_MODEL` env var (explicit override)
+/// 2. `"model"` key from the global opencode config
+///    (`~/.config/opencode/opencode.json` or `.jsonc`)
+///
+/// Without an explicit `--model`, `opencode run` blocks indefinitely waiting
+/// for interactive model selection even when the config file names a default —
+/// so the flag is mandatory for non-interactive daemon spawns.
+pub struct OpenCodeAdapter;
+
+impl OpenCodeAdapter {
+    /// Resolve the model id to pass via `--model`. None = cannot determine.
+    fn resolve_model() -> Option<String> {
+        if let Ok(m) = std::env::var("ANTI_OPENCODE_MODEL")
+            && !m.trim().is_empty()
+        {
+            return Some(m.trim().to_string());
+        }
+        let home = std::env::var("HOME").ok()?;
+        let base = PathBuf::from(home).join(".config").join("opencode");
+        for name in ["opencode.json", "opencode.jsonc"] {
+            let path = base.join(name);
+            if let Ok(content) = std::fs::read_to_string(&path)
+                && let Some(model) = extract_json_string_field(&content, "model")
+            {
+                return Some(model);
+            }
+        }
+        None
+    }
+}
+
+/// Minimal `"key": "value"` extractor tolerant of JSONC comments. Scans for
+/// the quoted key at any depth and returns the following string literal.
+fn extract_json_string_field(content: &str, key: &str) -> Option<String> {
+    let needle = format!("\"{key}\"");
+    let mut rest = content;
+    while let Some(pos) = rest.find(&needle) {
+        // Skip a match that sits on a `//`-commented line: the comment marker
+        // must appear before the key on the same line.
+        let before = &rest[..pos];
+        let line_start = before.rfind('\n').map(|i| i + 1).unwrap_or(0);
+        if before[line_start..].contains("//") {
+            rest = &rest[pos + needle.len()..];
+            continue;
+        }
+        let after = rest[pos + needle.len()..].trim_start();
+        let after = after.strip_prefix(':')?.trim_start();
+        let after = after.strip_prefix('"')?;
+        let end = after.find('"')?;
+        let value = &after[..end];
+        if !value.is_empty() {
+            return Some(value.to_string());
+        }
+        rest = &rest[pos + needle.len()..];
+    }
+    None
+}
+
 /// Sleep adapter — deterministic test double (no network, no auth, no model).
 /// Runs `sleep <seconds>` in the leased worktree: alive until the timeout,
 /// then exits 0. Lets integration tests control process lifetime exactly.
@@ -146,10 +207,6 @@ impl HarnessAdapter for SleepAdapter {
     }
 }
 
-/// OpenCode adapter (real CLI: `opencode run --format json [-c --session <id>] [<message>...]`).
-/// Task is passed as positional args or stdin; peer prompt prepended to message when present.
-pub struct OpenCodeAdapter;
-
 impl HarnessAdapter for OpenCodeAdapter {
     fn name(&self) -> &'static str {
         "opencode"
@@ -157,7 +214,21 @@ impl HarnessAdapter for OpenCodeAdapter {
 
     fn spawn_command(&self, ctx: &SpawnContext) -> Result<Command, AdapterError> {
         let mut cmd = Command::new("opencode");
-        cmd.args(["run", "--format", "json", "--dir"]);
+        // --model is REQUIRED for non-interactive runs: without it `opencode
+        // run` blocks forever on interactive model selection even when the
+        // global config names a default.
+        match Self::resolve_model() {
+            Some(model) => {
+                cmd.args(["run", "--format", "json", "--model", &model, "--dir"]);
+            }
+            None => {
+                return Err(AdapterError::Spawn(
+                    "opencode model not resolved: set ANTI_OPENCODE_MODEL or add \"model\" to \
+                     ~/.config/opencode/opencode.json"
+                        .into(),
+                ));
+            }
+        }
         cmd.arg(ctx.worktree.as_os_str());
         let mut msg = String::new();
         if let Some(pp) = &ctx.peer_prompt {
@@ -173,5 +244,73 @@ impl HarnessAdapter for OpenCodeAdapter {
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::inherit());
         Ok(cmd)
+    }
+}
+
+#[cfg(test)]
+mod sleep_opencode_tests {
+    use super::*;
+
+    #[test]
+    fn sleep_adapter_parses_seconds_from_task() {
+        let ctx = SpawnContext {
+            worktree: PathBuf::from("."),
+            task: Some("120".into()),
+            peer_prompt: None,
+        };
+        let cmd = SleepAdapter.spawn_command(&ctx).unwrap();
+        let args = cmd.get_args().collect::<Vec<_>>();
+        assert_eq!(args, vec!["120"]);
+    }
+
+    #[test]
+    fn sleep_adapter_defaults_to_60s() {
+        let ctx = SpawnContext {
+            worktree: PathBuf::from("."),
+            task: None,
+            peer_prompt: None,
+        };
+        let cmd = SleepAdapter.spawn_command(&ctx).unwrap();
+        let args = cmd.get_args().collect::<Vec<_>>();
+        assert_eq!(args, vec!["60"]);
+    }
+
+    #[test]
+    fn opencode_requires_resolved_model() {
+        // In test env neither ANTI_OPENCODE_MODEL nor HOME config may exist —
+        // both outcomes are legal; the contract is only that spawn never hangs.
+        let ctx = SpawnContext {
+            worktree: PathBuf::from("."),
+            task: Some("hi".into()),
+            peer_prompt: Some("peer".into()),
+        };
+        let _ = OpenCodeAdapter.spawn_command(&ctx);
+    }
+
+    #[test]
+    fn extract_model_field_plain_json() {
+        let cfg = r#"{"provider": {}, "model": "9router/xxx"}"#;
+        assert_eq!(
+            extract_json_string_field(cfg, "model"),
+            Some("9router/xxx".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_model_field_jsonc_commented_out() {
+        let cfg = "// {\"model\": \"old\"}\n{\"model\": \"new/m\"}";
+        assert_eq!(
+            extract_json_string_field(cfg, "model"),
+            Some("new/m".into())
+        );
+    }
+
+    #[test]
+    fn extract_model_field_missing() {
+        assert_eq!(extract_json_string_field("{\"a\":1}", "model"), None);
+        assert_eq!(
+            extract_json_string_field("{\"model\": \"\"}", "model"),
+            None
+        );
     }
 }
