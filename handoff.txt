@@ -1,0 +1,97 @@
+# HANDOFF — anti_subagent
+**Ngày:** 2026-08-22 | **Branch:** main @ `0f026bb` | **Tests:** 204 unit pass, integration T1-T6 FAIL
+
+---
+
+## 1. Đã làm xong (verify được)
+
+### Claude spawn fix (PR #9, merged `d0dde0e`)
+- Bug: `ClaudeCodeAdapter` build `--input-format stream-json --output-format stream-json`
+  nhưng stdin ghi plain text → `JSON Parse error`; thiếu `--verbose` → `requires --verbose`.
+- Fix: `crates/anti-adapters/src/lib.rs` → `claude -p --verbose --output-format stream-json`,
+  bỏ `--input-format stream-json` (default `text`, plain text stdin là đúng).
+- Verified end-to-end: daemon spawn peer `test2` task "Create DONE.txt" → status COMPLETED,
+  worktree có DONE.txt = "ok", event `TurnCompleted {cost $0.64}`.
+
+### OpenCode adapter fix (commit `0f026bb`, CHƯA test e2e thành công)
+- Sửa arg order: `opencode run --format json --dir <worktree> "<msg>"` (trước sai: `--` + `--dir` sau message).
+- ⚠️ Spawn thật vẫn TREO: process chạy nhưng không output, không tạo file. Manual probe
+  `opencode run --format json --dir /tmp/anti-oc-repo "..."` timeout 20s stdout rỗng.
+  Nghi vấn: opencode đợi auth/model interactive, hoặc cần `opencode serve` + HTTP/SSE
+  (xem PROVIDER_ABSTRACTION_AND_SLP_REPORT.md §1.1 — paseo dùng REST+SSE cho opencode).
+
+### Integration harness cross-platform (commit `0f026bb`, suite VẪN FAIL)
+- Trước: Windows-only (`.exe` path, `taskkill`, `tasklist`) → 6/6 FAILED trên macOS.
+- Đã sửa: debug bin path qua `cfg!(windows)`, `pkill`, `kill -0`, helper `kill_pid`.
+- ⚠️ Chưa pass — root cause từng test (mục 3).
+
+### Paseo study (`.tmp/paseo` = clone getpaseo/paseo)
+- Anti copy đúng từ paseo: identity model (AgentId≠PID≠SessionId), AgentClient/AgentSession
+  traits + ProviderCapabilities, statemachine (+Blocked/Recovering/Replaced),
+  attentionReason finished|error|permission, config layering.
+- Anti khác cố ý: SQLite WAL + JSONL events (paseo: file-per-agent JSON + in-memory timeline);
+  governance hard-code Rust thay vì prompt-skill; bỏ WebSocket/relay/MCP/voice (KISS).
+- Học tiếp được từ paseo (chưa làm): loop verifyChecks (shell checks + LLM verifier mỗi iteration),
+  timeline epochs + cursor pagination, chat rooms + @mentions, schedule service.
+
+### Trước đó (đã push `c8bffb3`)
+- Issues #3-#8 trên GitHub + 6 plan files `docs/plans/issue-{3..8}-*.md`.
+
+## 2. Git hiện tại
+```
+main: 0f026bb wip: opencode adapter arg order + cross-platform integration harness (macOS)
+      d0dde0e Merge PR #9 (claude spawn --verbose fix)
+      c8bffb3..77bd45b docs(plan): #3-#8
+      1dc4476 feat: SLP governance layer (bead 5.6)
+```
+
+## 3. Còn thiếu — LÀM TIẾP THEO THỨ TỰ ƯU TIÊN
+
+### P0 — Integration suite T1-T6 (crates/anti-integration/tests/integration_phase0.rs)
+Chạy: `cargo build && cargo test -p anti-integration -- --test-threads=1 --nocapture`
+Fail pattern khi probe tay:
+- T1: spawn OK nhưng `list` rỗng — test dùng `--repo .` không phải git repo; check treehouse
+  acquire path + CLI spawn cần task gì (`anti-cli spawn --help`). Probe tay với git repo thật thì OK.
+- T2/T3: `stop`/`kill` gửi SIGTERM nhưng claude process còn sống 30s+ — cần SIGTERM→wait→SIGKILL
+  escalation trong reaper/handle_stop.
+- T4/T5 (kill -9 crash sim): expect Crashed/Failed nhưng ra COMPLETED + attention=finished —
+  claude tự exit TRƯỚC khi kill nên reaper mark COMPLETED trước. Fix: test dùng task dài hơn
+  (sleep script) hoặc daemon phân biệt killed-by-signal (WaitStatus) vs exit-code-0.
+- T6 (restart recovery): reaper chưa kịp attach trong 500ms restart window; gc chưa reclaim.
+  Check `recovery.rs` unified recovery + `spawn_gen`/`owner_started_at` PID-reuse safety (P4).
+
+### P1 — OpenCode spawn treo (mục 1)
+- Debug: chạy `opencode run` manual xem có prompt auth/model không; check `opencode.json`.
+- Phương án B (theo paseo): bỏ CLI-run, dùng `opencode serve --port N` + HTTP/SSE
+  (GlobalEvent stream) — đã có design sẵn trong PROVIDER_ABSTRACTION_AND_SLP_REPORT.md.
+- Sau khi xong: verify e2e như claude (DONE.txt trong worktree).
+
+### P2 — Implement issues #3-#8 theo plans sẵn có (docs/plans/)
+- #3 tier routing: wire `resolve_route` (routing.rs) vào governance (đang hardcode claude-sonnet).
+- #4 benchmark: populate RunMetrics.tokens_in/out từ TurnCompleted usage (event log đã có cost).
+- #5 DENY guard: guard/rules.toml + guard_install đã có; wire auto-install on spawn + GuardViolation event.
+- #6 smoke test: chính là P0 ở trên — gộp.
+- #7 study astra: tarball ở /tmp/astra/astra-main (fork T3 Code, control surface) — extract patterns.
+- #8 supervisor state qua control surface: HTTP/WS endpoint expose hierarchy + `--json` flag.
+
+### P3 — Học thêm từ paseo
+- loop verifyChecks → anti-bench acceptance gate; timeline epochs → events compaction;
+  Codex adapter test thật (`codex exec --json --skip-git-repo-check -C <wt>` — chưa test lần nào).
+
+## 4. Lệnh verify nhanh khi nhận việc
+```bash
+cd ~/Projects/anti_subagent
+cargo build && cargo test --workspace --exclude anti-integration   # kỳ vọng: 204 passed
+cargo test -p anti-integration -- --test-threads=1                 # P0: fix cho pass
+./target/debug/anti-cli --state-dir /tmp/anti-state daemon start
+rm -rf /tmp/e2e-repo && git init -q /tmp/e2e-repo
+./target/debug/anti-cli --state-dir /tmp/anti-state spawn --id t1 --role peer \
+  --harness claude --task-path /tmp/task.txt --repo /tmp/e2e-repo   # task.txt: "Create DONE.txt with ok"
+# poll status → COMPLETED; ls worktree trong /tmp/anti-state/worktrees/
+```
+
+## 5. Lưu ý môi trường
+- Daemon socket: `$state_dir/anti_subagent.sock` (Unix) — stop daemon cũ trước khi test (`daemon stop`).
+- Logs peer: `~/.anti_subagent/logs/{id}.log`.
+- Model qua openproxy custom 127.0.0.1:20128 (giống ~/.claude/settings.json).
+- KHÔNG mention Discord trong issues/docs.
