@@ -24,12 +24,16 @@ fn make_treehouse(state_dir: &std::path::Path) -> Treehouse {
 /// Daemonize: detach from the parent's process group/session so a killed
 /// parent shell (e.g. a timed-out Bash tool call) never takes the daemon
 /// down with it. macOS has no `setsid` binary, so we do it in-process.
-#[cfg(unix)]
-fn daemonize() {
+fn daemonize(state_dir: &PathBuf) {
     use std::os::unix::process::CommandExt;
     if std::env::var("ANTI_DAEMONIZED").is_ok() {
         return; // already detached
     }
+    // B2: never lose child diagnostics. Redirect the detached child's
+    // stderr to $state_dir/logs/daemon.err so first-run failures are visible.
+    let logs_dir = state_dir.join("logs");
+    let _ = std::fs::create_dir_all(&logs_dir);
+    let err_file = logs_dir.join("daemon.err");
     // Fork via spawning ourselves detached with the flag set.
     let exe = std::env::current_exe().unwrap_or_default();
     let mut cmd = std::process::Command::new(&exe);
@@ -41,15 +45,24 @@ fn daemonize() {
     }
     cmd.stdin(std::process::Stdio::null());
     cmd.stdout(std::process::Stdio::null());
-    cmd.stderr(std::process::Stdio::null());
+    if let Ok(f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&err_file)
+    {
+        cmd.stderr(std::process::Stdio::from(f));
+    } else {
+        cmd.stderr(std::process::Stdio::null());
+    }
     cmd.process_group(0); // new process group
     let _ = cmd.spawn();
     std::process::exit(0);
 }
 
 fn main() {
-    #[cfg(unix)]
-    daemonize();
+    // B2: resolve the state dir BEFORE daemonize — both the lock file and
+    // the child's stderr log live under it, and a fresh state dir must be
+    // created up front or the lock open fails with ENOENT.
     let state_dir = std::env::var("ANTI_STATE_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
@@ -57,6 +70,15 @@ fn main() {
                 .map(|h| PathBuf::from(h).join(".anti_subagent"))
                 .unwrap_or_else(|_| PathBuf::from("."))
         });
+    if let Err(e) = std::fs::create_dir_all(&state_dir) {
+        eprintln!(
+            "anti-daemon: cannot create state dir {}: {e}",
+            state_dir.display()
+        );
+        std::process::exit(1);
+    }
+    #[cfg(unix)]
+    daemonize(&state_dir);
     let socket = ipc::socket_path(&state_dir);
 
     // Daemon single-instance lock (fd-lock). Held for entire daemon lifetime.
@@ -382,8 +404,19 @@ fn main() {
                                 );
                                 continue;
                             }
-                            _ => EventType::AgentStarted,
+                            // B3: never emit AgentStarted from the provider
+                            // bridge — lifecycle events belong to spawn /
+                            // recovery only. Known-but-uninteresting kinds
+                            // are skipped; unknown kinds persist as
+                            // PROVIDER_EVENT for auditability.
+                            anti_adapters::AgentEvent::AssistantDelta { .. }
+                            | anti_adapters::AgentEvent::SystemMessage { .. }
+                            | anti_adapters::AgentEvent::ToolCallUpdate { .. } => {
+                                continue;
+                            }
+                            _ => EventType::ProviderEvent,
                         };
+
                         // Persist usage verbatim (issue #4): token/cost data is
                         // the benchmark's ground truth — never strip it.
                         let usage = match &bridged.event {
@@ -1431,6 +1464,37 @@ fn spawn(
         task: task_path.map(str::to_string),
         peer_prompt: Some(peer_prompt.to_string()),
     };
+    // Paseo-style controlled runtimes (opt-in per harness):
+    //   ANTI_CODEX_MODE=app-server  → JSON-RPC session over stdio
+    //   ANTI_OPENCODE_MODE=serve    → HTTP serve + session/message
+    // Both block the spawn request until the task finishes (turn/completed /
+    // final assistant message) — the daemon keeps ownership semantics: the
+    // long-lived server child is tracked in `children`, status transitions
+    // and events are written by this handler exactly like the exec path.
+    if harness == "codex" && std::env::var("ANTI_CODEX_MODE").as_deref() == Ok("app-server") {
+        return spawn_codex_app_server(
+            store,
+            children,
+            id,
+            task_path,
+            &worktree,
+            peer_prompt,
+            repo,
+        );
+    }
+    if harness == "opencode" && std::env::var("ANTI_OPENCODE_MODE").as_deref() == Ok("serve") {
+        return spawn_opencode_serve(
+            store,
+            children,
+            id,
+            task_path,
+            &worktree,
+            peer_prompt,
+            treehouse,
+            repo,
+        );
+    }
+
     let adapter: Box<dyn HarnessAdapter> = match harness {
         "codex" => Box::new(CodexAdapter),
         "opencode" => Box::new(OpenCodeAdapter),
@@ -1489,6 +1553,155 @@ fn spawn(
             let _ = store.append_event(id, EventType::AgentFailed, json!({"error": e.to_string()}));
             let _ = treehouse.release(&worktree.path, std::path::Path::new(repo), None);
             Response::err("spawn", format!("{e}"))
+        }
+    }
+}
+
+/// Codex app-server runtime (ANTI_CODEX_MODE=app-server).
+/// Runs the whole task synchronously inside the spawn request — the peer is
+/// RUNNING while the turn executes, then COMPLETED/FAILED. The app-server
+/// child stays tracked in `children` until the daemon stops it.
+fn spawn_codex_app_server(
+    store: &mut Store,
+    children: &mut HashMap<String, Child>,
+    id: &str,
+    task_path: Option<&str>,
+    worktree: &anti_workspace::Lease,
+    peer_prompt: &str,
+    repo: &str,
+) -> Response {
+    let prompt = match task_path {
+        Some(t) => resolve_task_prompt(t),
+        None => peer_prompt.to_string(),
+    };
+    let prompt = format!("{peer_prompt}\n\n{prompt}");
+    match anti_daemon::paseo_runtime::codex_app_server::CodexAppServer::connect(&worktree.path) {
+        Ok(mut server) => {
+            let pid = server.child.id();
+            let _ = store.attach_pid(id, pid);
+            let _ = store.update_status(id, AgentStatus::Running);
+            let _ = store.append_event(
+                id,
+                EventType::AgentStarted,
+                json!({"pid": pid, "mode": "app-server", "worktree": worktree.path.display().to_string()}),
+            );
+
+            let result = (|| -> Result<(), String> {
+                let thread_id = server
+                    .start_thread(&worktree.path.display().to_string())
+                    .map_err(|e| e.to_string())?;
+                server
+                    .run_turn(&thread_id, &prompt, 3600)
+                    .map_err(|e| e.to_string())
+            })();
+            children.insert(id.to_string(), server.child);
+
+            match result {
+                Ok(()) => {
+                    let _ = store.update_status(id, AgentStatus::Completed);
+                    let _ = store.append_event(
+                        id,
+                        EventType::AgentCompleted,
+                        json!({"mode": "app-server"}),
+                    );
+                    Response::ok(json!({
+                        "id": id, "status": "running", "pid": pid, "mode": "app-server",
+                        "workspace": {"lease_id": worktree.lease_id, "path": worktree.path.display().to_string()}
+                    }))
+                }
+                Err(e) => {
+                    let _ = store.update_status(id, AgentStatus::Failed);
+                    let _ = store.append_event(
+                        id,
+                        EventType::AgentFailed,
+                        json!({"mode": "app-server", "error": e}),
+                    );
+                    let _ = treehouse_release_helper(worktree, repo);
+                    Response::err("turn", e)
+                }
+            }
+        }
+        Err(e) => {
+            let _ = store.update_status(id, AgentStatus::Failed);
+            let _ = store.append_event(id, EventType::AgentFailed, json!({"error": e.to_string()}));
+            Response::err("spawn", e.to_string())
+        }
+    }
+}
+
+fn treehouse_release_helper(_worktree: &anti_workspace::Lease, _repo: &str) -> Result<(), ()> {
+    // Lease release happens via treehouse gc on daemon shutdown; keep the
+    // signature for future explicit release wiring.
+    Ok(())
+}
+
+/// OpenCode serve runtime (ANTI_OPENCODE_MODE=serve).
+/// Same synchronous semantics as the codex app-server branch above.
+fn spawn_opencode_serve(
+    store: &mut Store,
+    children: &mut HashMap<String, Child>,
+    id: &str,
+    task_path: Option<&str>,
+    worktree: &anti_workspace::Lease,
+    peer_prompt: &str,
+    _treehouse: &Treehouse,
+    repo: &str,
+) -> Response {
+    let port: u16 = std::env::var("ANTI_OPENCODE_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(4621);
+    let wt = worktree.path.display().to_string();
+    let prompt = match task_path {
+        Some(t) => resolve_task_prompt(t),
+        None => peer_prompt.to_string(),
+    };
+    let prompt = format!("{peer_prompt}\n\n{prompt}");
+    match anti_daemon::paseo_runtime::opencode_serve::OpenCodeServe::connect(port) {
+        Ok(server) => {
+            let pid = server.child.id();
+            let _ = store.attach_pid(id, pid);
+            let _ = store.update_status(id, AgentStatus::Running);
+            let _ = store.append_event(
+                id,
+                EventType::AgentStarted,
+                json!({"pid": pid, "mode": "serve", "port": port, "worktree": wt}),
+            );
+
+            let result = (|| -> Result<(), String> {
+                let sid = server.create_session(&wt).map_err(|e| e.to_string())?;
+                server
+                    .run_prompt(&sid, &wt, &prompt)
+                    .map_err(|e| e.to_string())
+            })();
+            children.insert(id.to_string(), server.child);
+
+            match result {
+                Ok(()) => {
+                    let _ = store.update_status(id, AgentStatus::Completed);
+                    let _ =
+                        store.append_event(id, EventType::AgentCompleted, json!({"mode": "serve"}));
+                    Response::ok(json!({
+                        "id": id, "status": "running", "pid": pid, "mode": "serve",
+                        "workspace": {"lease_id": worktree.lease_id, "path": wt}
+                    }))
+                }
+                Err(e) => {
+                    let _ = store.update_status(id, AgentStatus::Failed);
+                    let _ = store.append_event(
+                        id,
+                        EventType::AgentFailed,
+                        json!({"mode": "serve", "error": e}),
+                    );
+                    let _ = treehouse_release_helper(worktree, repo);
+                    Response::err("turn", e)
+                }
+            }
+        }
+        Err(e) => {
+            let _ = store.update_status(id, AgentStatus::Failed);
+            let _ = store.append_event(id, EventType::AgentFailed, json!({"error": e.to_string()}));
+            Response::err("spawn", e.to_string())
         }
     }
 }
@@ -1665,18 +1878,43 @@ fn install_guard_into_worktree(worktree: &std::path::Path) {
         hook_cmd = "bash anti-guard.sh".to_string();
     }
 
-    let hooks = serde_json::json!({
-        "PreToolUse": [{
-            "matcher": ".*",
-            "hooks": [{"type": "command", "command": hook_cmd}]
-        }],
-        "_anti_guard": {"installed_by": "daemon-spawn", "fail_closed": true}
+    // B1: Claude Code reads project hooks ONLY from `.claude/settings.json`
+    // (a bare `hooks.json` is never loaded). Merge into the existing
+    // settings document instead of overwriting, and register our PreToolUse
+    // entry exactly once (idempotent re-runs).
+    let settings_path = claude_dir.join("settings.json");
+    let mut settings: serde_json::Value = std::fs::read_to_string(&settings_path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| json!({}));
+
+    let entry = json!({
+        "matcher": ".*",
+        "hooks": [{"type": "command", "command": hook_cmd}]
     });
+    {
+        let obj = settings
+            .as_object_mut()
+            .expect("settings must be an object");
+        let hooks = obj
+            .entry("hooks")
+            .or_insert_with(|| json!({}))
+            .as_object_mut()
+            .expect("hooks must be an object");
+        let pre = hooks
+            .entry("PreToolUse")
+            .or_insert_with(|| json!([]))
+            .as_array_mut()
+            .expect("PreToolUse must be an array");
+        if !pre.contains(&entry) {
+            pre.push(entry);
+        }
+    }
     if let Err(e) = std::fs::write(
-        claude_dir.join("hooks.json"),
-        serde_json::to_string_pretty(&hooks).unwrap_or_default(),
+        &settings_path,
+        serde_json::to_string_pretty(&settings).unwrap_or_default(),
     ) {
-        eprintln!("[guard] hooks.json write failed: {e}");
+        eprintln!("[guard] settings.json write failed: {e}");
     }
 }
 

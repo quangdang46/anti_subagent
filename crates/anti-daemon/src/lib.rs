@@ -10,6 +10,7 @@ pub mod event_bus;
 pub mod handoff;
 pub mod ipc;
 pub mod loop_service;
+pub mod paseo_runtime;
 pub mod peer_manager;
 pub mod recovery;
 pub mod report;

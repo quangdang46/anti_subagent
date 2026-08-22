@@ -50,6 +50,8 @@ pub enum EventType {
     PermissionRequested,
     PermissionResolved,
     GuardViolated,
+    /// B3: provider stream event with no lifecycle meaning (audit-only).
+    ProviderEvent,
     WorkspaceAcquired,
     WorkspaceReleased,
     WorkspaceCleaned,

@@ -227,7 +227,11 @@ pub fn daemon(state_dir: &PathBuf, action: crate::DaemonAction) -> Result<String
                 }
                 std::thread::sleep(std::time::Duration::from_millis(100));
             }
-            Err("daemon failed to come up within 5s".into())
+            // B2: surface where the child's stderr went.
+            Err(format!(
+                "daemon failed to come up within 5s — see {}/logs/daemon.err",
+                state_dir.display()
+            ))
         }
         crate::DaemonAction::Stop => {
             let sock = socket(state_dir);
@@ -329,7 +333,8 @@ pub fn guard_install(
     }
     let claude_dir = ws.join(".claude");
     std::fs::create_dir_all(&claude_dir).map_err(|e| e.to_string())?;
-    let hooks_path = claude_dir.join("hooks.json");
+    // B1: Claude Code reads project hooks ONLY from `.claude/settings.json`.
+    let settings_path = claude_dir.join("settings.json");
     let guard_script = std::env::var("HOME")
         .map(|h| format!("{h}/.anti_subagent/guard/anti-guard.sh"))
         .unwrap_or_else(|_| "anti-guard.sh".to_string());
@@ -339,41 +344,49 @@ pub fn guard_install(
     } else {
         "concealed"
     };
-    let existing = if hooks_path.exists() {
-        std::fs::read_to_string(&hooks_path).unwrap_or_else(|_| "{}".to_string())
+    let existing = if settings_path.exists() {
+        std::fs::read_to_string(&settings_path).unwrap_or_else(|_| "{}".to_string())
     } else {
         "{}".to_string()
     };
     let mut v: serde_json::Value =
-        serde_json::from_str(&existing).map_err(|e| format!("invalid hooks.json: {e}"))?;
-    let hooks = v.as_object_mut().ok_or("hooks.json must be an object")?;
-    hooks.insert(
-        "PreToolUse".to_string(),
-        serde_json::json!([
+        serde_json::from_str(&existing).map_err(|e| format!("invalid settings.json: {e}"))?;
+    if !v.is_object() {
+        v = serde_json::json!({});
+    }
+    let entry = serde_json::json!({
+        "matcher": ".*",
+        "hooks": [
             {
-                "matcher": ".*",
-                "hooks": [
-                    {
-                        "type": "command",
-                        "command": format!("{guard_script} --claude")
-                    }
-                ]
+                "type": "command",
+                "command": format!("{guard_script} --claude")
             }
-        ]),
-    );
-    // Record arm for audit (does not affect peer behavior for concealed).
-    hooks.insert(
-        "_anti_guard_arm".to_string(),
-        serde_json::json!(guard_annotation),
-    );
+        ]
+    });
+    {
+        let obj = v.as_object_mut().unwrap();
+        let hooks = obj
+            .entry("hooks")
+            .or_insert_with(|| serde_json::json!({}))
+            .as_object_mut()
+            .ok_or("hooks must be an object")?;
+        let pre = hooks
+            .entry("PreToolUse")
+            .or_insert_with(|| serde_json::json!([]))
+            .as_array_mut()
+            .ok_or("PreToolUse must be an array")?;
+        if !pre.contains(&entry) {
+            pre.push(entry);
+        }
+    }
     std::fs::write(
-        &hooks_path,
+        &settings_path,
         serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?,
     )
     .map_err(|e| e.to_string())?;
     Ok(format!(
         "guard installed at {} (arm:{})",
-        hooks_path.display(),
+        settings_path.display(),
         guard_annotation
     ))
 }

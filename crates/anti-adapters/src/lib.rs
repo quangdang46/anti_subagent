@@ -162,7 +162,7 @@ impl OpenCodeAdapter {
 
 /// Minimal `"key": "value"` extractor tolerant of JSONC comments. Scans for
 /// the quoted key at any depth and returns the following string literal.
-fn extract_json_string_field(content: &str, key: &str) -> Option<String> {
+pub fn extract_json_string_field(content: &str, key: &str) -> Option<String> {
     let needle = format!("\"{key}\"");
     let mut rest = content;
     while let Some(pos) = rest.find(&needle) {
