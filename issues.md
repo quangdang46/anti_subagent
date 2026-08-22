@@ -5,9 +5,9 @@ integration T1–T6 **6/6 passed** ✅, real e2e spawn (`claude` peer, treehouse
 
 | # | Severity | Title | Status |
 |---|----------|-------|--------|
-| B1 | 🔴 **P0 — Critical** | Guard hook installed to wrong file — Claude Code never reads it, deny-guard is inert | Open |
-| B2 | 🟡 P1 | Fresh-state-dir bootstrap fails silently (`create_dir_all` missing + stderr nulled by daemonize) | Open |
-| B3 | 🟡 P2 | Event bridge maps every unmatched provider event to `AgentStarted` → 31× duplicate per run | Open |
+| B1 | 🔴 **P0 — Critical** | Guard hook installed to wrong file — Claude Code never reads it, deny-guard is inert | **Fixed** (2d2e7ac) |
+| B2 | 🟡 P1 | Fresh-state-dir bootstrap fails silently (`create_dir_all` missing + stderr nulled by daemonize) | **Fixed** (2d2e7ac) |
+| B3 | 🟡 P2 | Event bridge maps every unmatched provider event to `AgentStarted` → 31× duplicate per run | **Fixed** (2d2e7ac) |
 
 ---
 
