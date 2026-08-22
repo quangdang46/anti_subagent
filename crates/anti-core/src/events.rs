@@ -49,6 +49,7 @@ pub enum EventType {
     VerificationFailed,
     PermissionRequested,
     PermissionResolved,
+    GuardViolated,
     WorkspaceAcquired,
     WorkspaceReleased,
     WorkspaceCleaned,
@@ -204,6 +205,12 @@ pub enum AgentEvent {
     },
     /// Native subagent completed.
     SubagentCompleted { id: String, status: SubagentStatus },
+    /// Issue #5: a delegation-shaped tool call was detected in a peer
+    /// session — the guard denied it and the control plane must see it.
+    GuardViolation {
+        tool_name: String,
+        call_id: Option<String>,
+    },
 
     // ─── Permissions ───
     /// Permission request from provider.

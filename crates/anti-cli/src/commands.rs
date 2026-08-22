@@ -455,6 +455,19 @@ pub fn doctor(state_dir: &PathBuf) -> Result<String, String> {
         }
     ));
 
+    // Issue #5: guard hook source — the daemon copies this into every peer
+    // worktree at spawn; report whether the source of truth exists.
+    let guard_script = state_dir.join("guard").join("anti-guard.sh");
+    let guard_repo = std::env::current_dir()
+        .map(|d| d.join("guard").join("anti-guard.sh"))
+        .ok();
+    let guard_ok = guard_script.is_file() || guard_repo.map(|p| p.is_file()).unwrap_or(false);
+    lines.push(if guard_ok {
+        "guard: OK (deny-stem rules present — auto-installed on spawn)".to_string()
+    } else {
+        "guard: MISSING (guard/anti-guard.sh not found — peers unguarded)".to_string()
+    });
+
     let treehouse = std::process::Command::new("treehouse")
         .arg("--help")
         .output()

@@ -91,6 +91,7 @@ version = "0.1.0"
 dependencies = [
  "anti-core",
  "anti-daemon",
+ "serde",
  "serde_json",
 ]
 

@@ -40,9 +40,40 @@ pub struct SubagentState {
 
 // ─── Sidechain Tracker ────────────────────────────────────────────────────────
 
+/// Issue #5: mirrors guard/rules.toml `deny_stems`. A tool whose normalized
+/// name contains any of these stems is delegation-shaped and must never run
+/// inside a peer session.
+fn is_delegation_shaped(tool_name: &str) -> bool {
+    const DENY_STEMS: [&str; 14] = [
+        "agent",
+        "subagent",
+        "task",
+        "workflow",
+        "cron",
+        "schedul",
+        "worktree",
+        "delegate",
+        "spawn",
+        "dispatch",
+        "handoff",
+        "remote",
+        "sendmessage",
+        "monitor",
+    ];
+    let normalized: String = tool_name
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .flat_map(|c| c.to_lowercase())
+        .collect();
+    // mcp__* passthroughs are explicitly allowed by the rules file.
+    if tool_name.starts_with("mcp__") {
+        return false;
+    }
+    DENY_STEMS.iter().any(|stem| normalized.contains(stem))
+}
+
 /// Tracks provider-native subagents within a Peer's scope.
 pub struct SidechainTracker {
-    /// Active subagents keyed by provider-specific ID.
     active: HashMap<String, SubagentState>,
 }
 
@@ -58,6 +89,20 @@ impl SidechainTracker {
     /// Returns events to emit to the control plane.
     pub fn handle_event(&mut self, provider: ProviderKind, event: &AgentEvent) -> Vec<AgentEvent> {
         let mut events = Vec::new();
+
+        // Issue #5: ANY tool call whose name is delegation-shaped is a guard
+        // violation regardless of provider — surface it before tracking.
+        if let AgentEvent::ToolCallStart {
+            call_id, tool_name, ..
+        } = event
+        {
+            if is_delegation_shaped(tool_name) {
+                events.push(AgentEvent::GuardViolation {
+                    tool_name: tool_name.clone(),
+                    call_id: Some(call_id.clone()),
+                });
+            }
+        }
 
         match provider {
             ProviderKind::Claude => {
@@ -226,8 +271,13 @@ mod tests {
         };
 
         let events = tracker.handle_event(ProviderKind::Claude, &event);
-        assert_eq!(events.len(), 1);
-        assert!(matches!(events[0], AgentEvent::SubagentStarted { .. }));
+        // Issue #5: a delegation-shaped call yields BOTH a GuardViolation
+        // (control-plane signal) and the SubagentStarted tracking event.
+        assert_eq!(events.len(), 2);
+        assert!(
+            matches!(events[0], AgentEvent::GuardViolation { ref tool_name, .. } if tool_name == "Task")
+        );
+        assert!(matches!(events[1], AgentEvent::SubagentStarted { .. }));
         assert_eq!(tracker.active_count(), 1);
     }
 
@@ -275,8 +325,9 @@ mod tests {
         };
 
         let events = tracker.handle_event(ProviderKind::Codex, &event);
-        assert_eq!(events.len(), 1);
-        assert!(matches!(events[0], AgentEvent::SubagentStarted { .. }));
+        assert_eq!(events.len(), 2);
+        assert!(matches!(events[0], AgentEvent::GuardViolation { .. }));
+        assert!(matches!(events[1], AgentEvent::SubagentStarted { .. }));
     }
 
     #[test]
@@ -289,8 +340,35 @@ mod tests {
         };
 
         let events = tracker.handle_event(ProviderKind::OpenCode, &event);
-        assert_eq!(events.len(), 1);
-        assert!(matches!(events[0], AgentEvent::SubagentStarted { .. }));
+        assert_eq!(events.len(), 2);
+        assert!(matches!(events[0], AgentEvent::GuardViolation { .. }));
+        assert!(matches!(events[1], AgentEvent::SubagentStarted { .. }));
+    }
+
+    #[test]
+    fn guard_violation_on_delegation_shaped_tools() {
+        let mut tracker = SidechainTracker::new();
+        for (tool, denied) in [
+            ("Task", true),
+            ("Workflow", true),
+            ("SendMessage", true),
+            ("Read", false),
+            ("mcp__ffs__dispatch", false), // mcp__ passthrough allowed
+        ] {
+            let event = AgentEvent::ToolCallStart {
+                call_id: "c1".into(),
+                tool_name: tool.into(),
+                input: serde_json::Value::Null,
+            };
+            let events = tracker.handle_event(ProviderKind::Claude, &event);
+            assert_eq!(
+                events
+                    .iter()
+                    .any(|e| matches!(e, AgentEvent::GuardViolation { .. })),
+                denied,
+                "{tool} violation mismatch"
+            );
+        }
     }
 
     #[test]

@@ -29,7 +29,7 @@ const TASKS: [&str; 5] = [
     "Investigate a performance regression and fix it with tests.",
 ];
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, serde::Serialize)]
 struct RunMetrics {
     task_success: bool,
     tokens_in: u64,
@@ -142,7 +142,66 @@ fn main() {
     // Blinding (plan §34): the reviewer must be blind to arm identity. The
     // run artifacts are stripped of agent ids/arm tags before review.
     println!();
-    println!("## Blinding: artifacts saved under runs/<run-id>/ with arm tags STRIPPED");
+
+    // Issue #4 acceptance: structured artifacts under runs/<run-id>/
+    let run_dir = PathBuf::from("runs").join(format!("bench-{}", run_index()));
+    if let Err(e) = std::fs::create_dir_all(&run_dir) {
+        eprintln!("cannot create {}: {e}", run_dir.display());
+        return;
+    }
+
+    // metrics.json — full RunMetrics per arm (no agent ids, no arm tags in
+    // file names; the mapping lives only in this process).
+    let metrics: HashMap<&str, &Vec<RunMetrics>> = results
+        .iter()
+        .map(|(arm, runs)| (arm_name(*arm), runs))
+        .collect();
+    let metrics_path = run_dir.join("metrics.json");
+    match serde_json::to_string_pretty(&metrics) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write(&metrics_path, json) {
+                eprintln!("write {} failed: {e}", metrics_path.display());
+            } else {
+                println!("metrics: {}", metrics_path.display());
+            }
+        }
+        Err(e) => eprintln!("serialize metrics failed: {e}"),
+    }
+
+    // summary.csv — one row per arm: pass ratio, token totals, wall time,
+    // lifecycle counters. Significance columns come from the sign test above.
+    let csv_path = run_dir.join("summary.csv");
+    let mut csv = String::from(
+        "arm,pass,n,tokens_in_m,tokens_out_k,wall_s,crashes,restarts,reviews,rejections,escalations,revisions\n",
+    );
+    for arm in [Arm::A, Arm::B, Arm::C, Arm::D] {
+        let runs = results.get(&arm).cloned().unwrap_or_default();
+        if runs.is_empty() {
+            continue;
+        }
+        let pass = runs.iter().filter(|m| m.task_success).count();
+        let sum = |f: fn(&RunMetrics) -> u64| runs.iter().map(f).sum::<u64>();
+        let wall: f64 = runs.iter().map(|m| m.wall_secs).sum();
+        csv.push_str(&format!(
+            "{},{},{},{:.1},{},{:.0},{},{},{},{},{},{}\n",
+            arm_name(arm),
+            pass,
+            runs.len(),
+            sum(|m| m.tokens_in) as f64 / 1_000_000.0,
+            sum(|m| m.tokens_out) / 1_000,
+            wall,
+            sum(|m| m.crashes as u64),
+            sum(|m| m.restarts as u64),
+            sum(|m| m.reviews as u64),
+            sum(|m| m.rejections as u64),
+            sum(|m| m.escalations as u64),
+            sum(|m| m.revisions as u64),
+        ));
+    }
+    match std::fs::write(&csv_path, &csv) {
+        Ok(()) => println!("summary: {}", csv_path.display()),
+        Err(e) => eprintln!("write {} failed: {e}", csv_path.display()),
+    }
 }
 
 /// Two-sided exact binomial tail: P(X ≤ k) for X ~ Binomial(total, 0.5).

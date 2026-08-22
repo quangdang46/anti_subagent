@@ -4,6 +4,7 @@
 
 pub mod agent_manager;
 pub mod bus;
+pub mod control_surface;
 pub mod event_bridge;
 pub mod event_bus;
 pub mod handoff;

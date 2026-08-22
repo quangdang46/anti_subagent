@@ -359,6 +359,29 @@ fn main() {
                             anti_adapters::AgentEvent::PermissionRequested { .. } => {
                                 EventType::AgentProgress
                             }
+                            // Issue #5: delegation-shaped tool call in a peer
+                            // session → control-plane violation + triage flag.
+                            // (The adapters' AgentEvent has no GuardViolation
+                            // variant; classification mirrors guard/rules.toml
+                            // and anti-core's subagent tracker.)
+                            anti_adapters::AgentEvent::ToolCallStart { tool_name, .. }
+                                if is_delegation_shaped_tool(tool_name) =>
+                            {
+                                let _ = s.set_attention(
+                                    &bridged.agent_id,
+                                    anti_core::attention::AttentionReason::Permission,
+                                );
+                                let _ = s.append_event(
+                                    &bridged.agent_id,
+                                    EventType::GuardViolated,
+                                    json!({
+                                        "tool": tool_name,
+                                        "action": "denied",
+                                        "reason": "delegation-shaped tool in peer session",
+                                    }),
+                                );
+                                continue;
+                            }
                             _ => EventType::AgentStarted,
                         };
                         // Persist usage verbatim (issue #4): token/cost data is
@@ -482,6 +505,24 @@ fn main() {
         };
         handle(&mut s, &mut c, req)
     };
+    // Issue #8: optional loopback HTTP control surface (ANTI_HTTP=1, default
+    // off). Serves GET /v1/hierarchy from the same store snapshot as the CLI.
+    {
+        let http_store = Arc::clone(&store);
+        let hierarchy_fn: anti_daemon::control_surface::HierarchyFn = Arc::new(move || {
+            let s = match http_store.lock() {
+                Ok(g) => g,
+                Err(_) => return json!({"error": "state lock poisoned"}),
+            };
+            let agents = s.list_agents().unwrap_or_default();
+            let attention = s
+                .list_attention()
+                .map(|v| v.into_iter().map(|a| a.id).collect::<Vec<_>>())
+                .unwrap_or_default();
+            build_hierarchy(&agents, &attention)
+        });
+        anti_daemon::control_surface::maybe_start(hierarchy_fn);
+    }
     // serve returns Ok(()) on graceful Shutdown or Err on failure — either
     // way the daemon process must exit so the socket is cleaned up.
     if let Err(e) = ipc::serve(&socket, dispatch) {
@@ -1473,6 +1514,36 @@ fn parse_status(s: &str) -> Option<AgentStatus> {
         "stopped" => AgentStatus::Stopped,
         _ => return None,
     })
+}
+
+/// Issue #5: mirrors guard/rules.toml `deny_stems` — same classification as
+/// anti-core's subagent tracker and the hook script.
+fn is_delegation_shaped_tool(tool_name: &str) -> bool {
+    const DENY_STEMS: [&str; 14] = [
+        "agent",
+        "subagent",
+        "task",
+        "workflow",
+        "cron",
+        "schedul",
+        "worktree",
+        "delegate",
+        "spawn",
+        "dispatch",
+        "handoff",
+        "remote",
+        "sendmessage",
+        "monitor",
+    ];
+    if tool_name.starts_with("mcp__") {
+        return false;
+    }
+    let normalized: String = tool_name
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .flat_map(|c| c.to_lowercase())
+        .collect();
+    DENY_STEMS.iter().any(|stem| normalized.contains(stem))
 }
 
 /// Issue #8: stable hierarchy JSON — one serializer shared by the CLI
