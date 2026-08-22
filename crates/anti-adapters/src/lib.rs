@@ -118,6 +118,34 @@ impl HarnessAdapter for CodexAdapter {
     }
 }
 
+/// Sleep adapter — deterministic test double (no network, no auth, no model).
+/// Runs `sleep <seconds>` in the leased worktree: alive until the timeout,
+/// then exits 0. Lets integration tests control process lifetime exactly.
+pub struct SleepAdapter;
+
+impl HarnessAdapter for SleepAdapter {
+    fn name(&self) -> &'static str {
+        "sleep"
+    }
+
+    fn spawn_command(&self, ctx: &SpawnContext) -> Result<Command, AdapterError> {
+        // Lifetime: task text "NNN" seconds (default 60). No stdin needed —
+        // closed immediately by the daemon after write attempt.
+        let secs: u64 = ctx
+            .task
+            .as_deref()
+            .and_then(|t| t.trim().parse().ok())
+            .unwrap_or(60);
+        let mut cmd = Command::new("sleep");
+        cmd.arg(secs.to_string());
+        cmd.current_dir(&ctx.worktree);
+        cmd.stdin(std::process::Stdio::piped());
+        cmd.stdout(std::process::Stdio::null());
+        cmd.stderr(std::process::Stdio::null());
+        Ok(cmd)
+    }
+}
+
 /// OpenCode adapter (real CLI: `opencode run --format json [-c --session <id>] [<message>...]`).
 /// Task is passed as positional args or stdin; peer prompt prepended to message when present.
 pub struct OpenCodeAdapter;

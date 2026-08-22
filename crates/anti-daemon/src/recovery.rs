@@ -83,11 +83,12 @@ fn find_dead_agents(store: &Store) -> Vec<anti_core::model::AgentRecord> {
             )
         })
         .filter(|rec| {
-            // Use store's is_agent_alive which checks PID + start time.
-            // Fall back to simple PID check if store method fails.
-            store
+            // Dead = liveness check fails. is_agent_alive verifies PID exists
+            // AND (when recorded) the process start time still matches, so a
+            // reused PID can never masquerade as the original peer.
+            !store
                 .is_agent_alive(&rec.id)
-                .unwrap_or_else(|_| is_pid_alive(rec.pid))
+                .unwrap_or_else(|_| !is_pid_alive(rec.pid))
         })
         .collect()
 }

@@ -911,6 +911,7 @@ fn parse_harness(s: &str) -> anti_core::model::Harness {
     match s {
         "codex" => anti_core::model::Harness::Codex,
         "opencode" => anti_core::model::Harness::OpenCode,
+        "sleep" => anti_core::model::Harness::Sleep,
         _ => anti_core::model::Harness::Claude,
     }
 }

@@ -32,6 +32,8 @@ pub enum Harness {
     Claude,
     Codex,
     OpenCode,
+    /// Deterministic test double: `sleep <secs>` in the worktree.
+    Sleep,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -1,5 +1,5 @@
 use anti_adapters::{
-    ClaudeCodeAdapter, CodexAdapter, HarnessAdapter, OpenCodeAdapter, SpawnContext,
+    ClaudeCodeAdapter, CodexAdapter, HarnessAdapter, OpenCodeAdapter, SleepAdapter, SpawnContext,
 };
 use anti_core::events::EventType;
 use anti_core::model::{AgentRecord, AgentStatus, Harness, Role};
@@ -240,24 +240,45 @@ fn main() {
                 let pid = store.get_agent(&id).ok().flatten().and_then(|r| r.pid);
                 match pid {
                     Some(pid) => {
-                        // Kill process (brief external I/O — acceptable)
-                        let st = std::process::Command::new("kill")
-                            .args([if force { "-9" } else { "-TERM" }, &pid.to_string()])
-                            .status();
-                        match st {
-                            Ok(s) if s.success() => {
-                                let _ = store.update_status(&id, AgentStatus::Stopped);
-                                let _ = store.append_event(
-                                    &id,
-                                    EventType::AgentStopped,
-                                    json!({"force": force}),
-                                );
-                                Response::ok(json!({"id": id, "status": "stopped"}))
+                        // Take the tracked Child first: try_wait() reaps the
+                        // zombie, which is what makes kill(pid,0) stop
+                        // succeeding. Without reaping, every wait below times
+                        // out on zombies and the periodic reaper later
+                        // misclassifies the stop as a crash.
+                        let mut tracked = children.remove(&id);
+                        let mut exited = || {
+                            tracked
+                                .as_mut()
+                                .map(|c| c.try_wait().ok().flatten().is_some())
+                                .unwrap_or(false)
+                        };
+                        let dead = if force {
+                            // Force: SIGKILL immediately.
+                            send_signal(pid, libc::SIGKILL) && wait_pid_gone(pid, 3.0, &mut exited)
+                        } else {
+                            // Graceful: SIGTERM → wait up to 3s → SIGKILL → wait 2s.
+                            if send_signal(pid, libc::SIGTERM) {
+                                if wait_pid_gone(pid, 3.0, &mut exited) {
+                                    true
+                                } else {
+                                    let _ = send_signal(pid, libc::SIGKILL);
+                                    wait_pid_gone(pid, 2.0, &mut exited)
+                                }
+                            } else {
+                                false
                             }
-                            Ok(_) => {
-                                Response::err("stop", format!("kill returned failure for {id}"))
-                            }
-                            Err(e) => Response::err("stop", e.to_string()),
+                        };
+                        drop(tracked.map(|mut c| c.wait()));
+                        if dead || !send_signal(pid, 0) {
+                            let _ = store.update_status(&id, AgentStatus::Stopped);
+                            let _ = store.append_event(
+                                &id,
+                                EventType::AgentStopped,
+                                json!({"force": force}),
+                            );
+                            Response::ok(json!({"id": id, "status": "stopped"}))
+                        } else {
+                            Response::err("stop", format!("process {pid} did not exit for {id}"))
                         }
                     }
                     None => Response::err("not_found", format!("no pid for {id}")),
@@ -498,6 +519,7 @@ fn spawn_peer(
             "claude" => Harness::Claude,
             "codex" => Harness::Codex,
             "opencode" => Harness::OpenCode,
+            "sleep" => Harness::Sleep,
             other => return Response::err("invalid", format!("unknown harness {other}")),
         };
         if !std::path::Path::new(repo).is_dir() {
@@ -676,6 +698,7 @@ fn spawn_peer_impl(
         "claude" => Harness::Claude,
         "codex" => Harness::Codex,
         "opencode" => Harness::OpenCode,
+        "sleep" => Harness::Sleep,
         other => return Response::err("invalid", format!("unknown harness {other}")),
     };
     if !std::path::Path::new(repo).is_dir() {
@@ -1067,20 +1090,56 @@ fn handle_report_task(
         Err(e) => Response::err("report_error", e.to_string()),
     }
 }
+/// Send a signal to a PID. Returns false if the process does not exist.
+#[cfg(unix)]
+fn send_signal(pid: u32, sig: i32) -> bool {
+    unsafe { libc::kill(pid as i32, sig) == 0 }
+}
+
+#[cfg(not(unix))]
+fn send_signal(_pid: u32, _sig: i32) -> bool {
+    false
+}
+
+/// Poll until the PID no longer exists. `reap` is invoked each tick: a tracked
+/// zombie still answers kill(pid,0), so only try_wait()-based reaping proves
+/// exit for children we own. `timeout_secs` bounds the total wait.
+#[cfg(unix)]
+fn wait_pid_gone(pid: u32, timeout_secs: f64, reap: &mut dyn FnMut() -> bool) -> bool {
+    let deadline = std::time::Instant::now() + Duration::from_secs_f64(timeout_secs);
+    loop {
+        if reap() || !send_signal(pid, 0) {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[cfg(not(unix))]
+fn wait_pid_gone(_pid: u32, _timeout_secs: f64, _reap: &mut dyn FnMut() -> bool) -> bool {
+    true
+}
+
 /// Poll children with try_wait; on exit, mark the agent Completed/Crashed.
 /// Orphaned worktrees are reclaimed by gc on next daemon restart.
 fn reap_children(store: &mut Store, children: &mut HashMap<String, Child>) {
-    let dead: Vec<(String, bool, Option<i32>)> = children
+    #[cfg(unix)]
+    use std::os::unix::process::ExitStatusExt;
+    let dead: Vec<(String, bool, Option<i32>, bool)> = children
         .iter_mut()
         .filter_map(|(id, child)| {
             child.try_wait().ok().flatten().map(|status| {
                 let code = status.code();
-                let ok = code.unwrap_or(1) <= 2;
-                (id.clone(), ok, code)
+                let signaled = cfg!(unix) && status.signal().is_some();
+                let ok = !signaled && code.unwrap_or(1) <= 2;
+                (id.clone(), ok, code, signaled)
             })
         })
         .collect();
-    for (id, ok, exit_code) in dead {
+    for (id, ok, exit_code, signaled) in dead {
         children.remove(&id);
         let workspace_lease = store
             .get_agent(&id)
@@ -1101,12 +1160,13 @@ fn reap_children(store: &mut Store, children: &mut HashMap<String, Child>) {
         if !is_ok {
             let payload = json!({
                 "exit_code": exit_code,
+                "killed_by_signal": signaled,
                 "workspace_lease_id": workspace_lease.as_ref().map(|w| &w.lease_id),
                 "workspace_path": workspace_lease.as_ref().map(|w| &w.path),
                 "crash_evidence": {
                     "timestamp": chrono::Utc::now().to_rfc3339(),
                     "process_exit_code": exit_code,
-                    "reason": if exit_code == Some(137) { "killed" } else { "crashed" },
+                    "reason": if signaled { "killed-by-signal" } else if exit_code == Some(137) { "killed" } else { "crashed" },
                 },
             });
             let _ = store.append_event(&id, EventType::PeerCrashed, payload);
@@ -1238,6 +1298,7 @@ fn spawn(
         "claude" => Harness::Claude,
         "codex" => Harness::Codex,
         "opencode" => Harness::OpenCode,
+        "sleep" => Harness::Sleep,
         other => return Response::err("invalid", format!("unknown harness {other}")),
     };
     if !std::path::Path::new(repo).is_dir() {
@@ -1308,6 +1369,7 @@ fn spawn(
     let adapter: Box<dyn HarnessAdapter> = match harness {
         "codex" => Box::new(CodexAdapter),
         "opencode" => Box::new(OpenCodeAdapter),
+        "sleep" => Box::new(SleepAdapter),
         _ => Box::new(ClaudeCodeAdapter),
     };
     let mut cmd = match adapter.spawn_command(&ctx) {
