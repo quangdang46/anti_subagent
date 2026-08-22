@@ -12,39 +12,53 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
 
-/// Helper: get the release binary path
+/// Helper: get binary path (debug build — what cargo test produces on macOS/Linux)
 fn anti_cli() -> PathBuf {
-    // Integration tests run from crates/anti-integration, but binaries are in root target/
+    let exe = if cfg!(windows) {
+        "anti-cli.exe"
+    } else {
+        "anti-cli"
+    };
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("parent")
         .parent()
         .expect("grandparent")
         .join("target")
-        .join("release")
-        .join("anti-cli.exe")
+        .join("debug")
+        .join(exe)
 }
 
 /// Helper: get the daemon binary path
 fn anti_daemon() -> PathBuf {
+    let exe = if cfg!(windows) {
+        "anti-daemon.exe"
+    } else {
+        "anti-daemon"
+    };
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("parent")
         .parent()
         .expect("grandparent")
         .join("target")
-        .join("release")
-        .join("anti-daemon.exe")
+        .join("debug")
+        .join(exe)
 }
 
-/// Helper: kill all anti processes
+/// Helper: kill all anti processes (cross-platform, like paseo's FakeAgentClient pid mgmt)
 fn kill_all() {
-    let _ = Command::new("taskkill")
-        .args(["/F", "/IM", "anti-daemon.exe"])
-        .output();
-    let _ = Command::new("taskkill")
-        .args(["/F", "/IM", "anti-cli.exe"])
-        .output();
+    if cfg!(windows) {
+        let _ = Command::new("taskkill")
+            .args(["/F", "/IM", "anti-daemon.exe"])
+            .output();
+        let _ = Command::new("taskkill")
+            .args(["/F", "/IM", "anti-cli.exe"])
+            .output();
+    } else {
+        let _ = Command::new("pkill").args(["-f", "anti-daemon"]).output();
+        let _ = Command::new("pkill").args(["-f", "anti-cli"]).output();
+    }
     std::thread::sleep(Duration::from_millis(500));
 }
 
@@ -67,14 +81,37 @@ fn run_cli(args: &[&str]) -> (String, i32) {
     (format!("{}\n{}", stdout, stderr), code)
 }
 
-/// Helper: check if process is alive
+/// Helper: check if process is alive (cross-platform: kill -0 on Unix)
 fn is_process_alive(pid: u32) -> bool {
-    let output = Command::new("tasklist")
-        .args(["/FI", &format!("PID eq {pid}"), "/NH"])
-        .output()
-        .expect("failed to run tasklist");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    stdout.contains(&pid.to_string())
+    if cfg!(windows) {
+        let output = Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+            .output()
+            .expect("failed to run tasklist");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        stdout.contains(&pid.to_string())
+    } else {
+        // kill -0: 0 = alive, non-zero = dead
+        Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+}
+
+
+/// Kill a pid (cross-platform crash simulation, like paseo's real process kill)
+fn kill_pid(pid: u32) {
+    if cfg!(windows) {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/F", "/PID", &pid.to_string()])
+            .output();
+    } else {
+        let _ = std::process::Command::new("kill")
+            .args(["-9", &pid.to_string()])
+            .output();
+    }
 }
 
 // ─── T1: Spawn peer normally ─────────────────────────────────────────
@@ -245,9 +282,7 @@ fn t4_peer_crash() {
     assert!(pid > 0, "failed to get PID");
 
     // Kill the peer (simulate crash)
-    let _ = Command::new("taskkill")
-        .args(["/F", "/PID", &pid.to_string()])
-        .output();
+    kill_pid(pid);
     std::thread::sleep(Duration::from_secs(2)); // Wait for reaper
 
     // Verify state is CRASHED
@@ -298,9 +333,7 @@ fn t5_crash_with_lease() {
     assert!(out.contains("lease_id"), "response should contain lease_id");
 
     // Kill the peer
-    let _ = Command::new("taskkill")
-        .args(["/F", "/PID", &pid.to_string()])
-        .output();
+    kill_pid(pid);
     std::thread::sleep(Duration::from_secs(2));
 
     // Verify crash detected
@@ -347,9 +380,7 @@ fn t6_crash_recovery_on_restart() {
         .unwrap_or(0);
 
     // Kill the peer (simulate crash)
-    let _ = Command::new("taskkill")
-        .args(["/F", "/PID", &pid.to_string()])
-        .output();
+    kill_pid(pid);
     std::thread::sleep(Duration::from_millis(500));
 
     // Kill daemon (simulate daemon crash)

@@ -129,7 +129,8 @@ impl HarnessAdapter for OpenCodeAdapter {
 
     fn spawn_command(&self, ctx: &SpawnContext) -> Result<Command, AdapterError> {
         let mut cmd = Command::new("opencode");
-        cmd.args(["run", "--format", "json"]);
+        cmd.args(["run", "--format", "json", "--dir"]);
+        cmd.arg(ctx.worktree.as_os_str());
         let mut msg = String::new();
         if let Some(pp) = &ctx.peer_prompt {
             msg.push_str(pp);
@@ -139,12 +140,8 @@ impl HarnessAdapter for OpenCodeAdapter {
             msg.push_str(task);
         }
         if !msg.is_empty() {
-            cmd.arg("--");
             cmd.arg(msg);
         }
-        cmd.args(["--dir"]);
-        cmd.arg(ctx.worktree.as_os_str());
-        cmd.stdin(std::process::Stdio::null());
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::inherit());
         Ok(cmd)
